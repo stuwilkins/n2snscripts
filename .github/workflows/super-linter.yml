@@ -1,0 +1,52 @@
+---
+
+# You can adjust the behavior by modifying this file.
+# For more information, see:
+# https://github.com/github/super-linter
+
+name: Lint Code Base
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  run_superlinter:
+    name: Run super-linter
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run super linter
+              # Pin to commit; not an official github action
+        uses: super-linter/super-linter@61abc07d755095a68f4987d1c2c3d1d64408f1f9  # v8.5.0
+        env:
+          DEFAULT_BRANCH: origin/main
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VALIDATE_BASH_EXEC: false  # lib/*.sh are sourced libraries, not executable scripts
+          VALIDATE_BIOME_FORMAT: false  # No biome.json config; needs discussion on whether to add or keep disabled
+          VALIDATE_CHECKOV: false  # Too many failures; enable this in a later PR
+          VALIDATE_CSS_PRETTIER: false  # CI messages have no info
+          VALIDATE_GRAPHQL_PRETTIER: false  # CI messages have no info
+          VALIDATE_HTML_PRETTIER: false  # CI messages have no info
+          VALIDATE_JAVASCRIPT_PRETTIER: false  # CI messages have no info
+          VALIDATE_JSCPD: false
+          VALIDATE_JSON_PRETTIER: false  # CI messages have no info
+          VALIDATE_JSONC_PRETTIER: false  # CI messages have no info
+          VALIDATE_JSX_PRETTIER: false  # CI messages have no info
+          VALIDATE_MARKDOWN_PRETTIER: false  # CI messages have no info
+          VALIDATE_NATURAL_LANGUAGE: false
+          VALIDATE_PYTHON_BLACK: false
+          VALIDATE_PYTHON_FLAKE8: false
+          VALIDATE_PYTHON_ISORT: false
+          VALIDATE_PYTHON_PYLINT: false
+          VALIDATE_TYPESCRIPT_PRETTIER: false  # CI messages have no info
+          VALIDATE_VUE_PRETTIER: false  # CI messages have no info
+          VALIDATE_YAML_PRETTIER: false  # CI messages have no info

@@ -1,0 +1,395 @@
+#!/usr/bin/env bash
+# bwclaude — Launch Claude CLI inside a bubblewrap (bwrap) sandbox.
+#
+# Requires: bwrap >= 0.4.0 (RHEL 8)
+#   - 0.4.0: base functionality
+#   - 0.5.0+: --clearenv (fallback: manual --unsetenv for each host var)
+#   - 0.6.3+: bind over ro-bind (fallback: skip binary masking)
+#
+# The sandbox provides filesystem isolation:
+#   - Current directory: read-write
+#   - Claude home (~/.claude or $CLAUDE_HOME): tmpfs (ephemeral by default)
+#     - logs/: bind-mounted read-write (persistent)
+#     - projects/: bind-mounted read-write (persistent)
+#     - todos/: bind-mounted read-write (persistent)
+#     - statsig/: bind-mounted read-write (persistent)
+#     - file-history/: bind-mounted read-write (per-file edit history for undo/restore)
+#     - sessions/: bind-mounted read-write (session metadata for --continue)
+#     - history.jsonl: bind-mounted read-write (prompt history across sessions)
+#     - .last-cleanup: bind-mounted read-write (throttles Claude's cleanup runs)
+#     - settings.json: bind-mounted read-write (if it exists; --init-auth creates a stub)
+#     - settings.local.json: bind-mounted read-only (if it exists)
+#     - Use --init-auth to make auth credentials and settings persistent
+#   - Claude state file (~/.claude.json): bind-mounted read-write (persistent)
+#     Contains only UI/session state (onboarding flags, feature caches, project history);
+#     not a credential, safe to persist unconditionally.
+#   - Claude cache (~/.cache/claude or $CLAUDE_CACHE_HOME): read-write
+#   - Git config + includes: read-only
+#   - Pixi cache: read-write
+#   - Pixi config: read-only
+#   - ccache config: read-only
+#   - ccache cache: read-write
+#   - npm config: read-only
+#   - npm cache: read-write
+#   - System and user binaries: read-only
+#   - SSH binaries: masked (ssh, scp, sftp, ssh-agent, etc.)
+#   - Network tools: masked (telnet, nc/ncat, socat, rsync, rsh)
+#   - Kerberos tools: masked (kinit, klist, kdestroy, kswitch)
+#   - Privilege escalation: masked (sudo, su, pkexec)
+#   - Namespace tools: masked (nsenter, unshare, chroot)
+#   - Keyring tools: masked (keyctl)
+#   - SSH/GPG agent env vars: stripped
+#   - ~/.bashrc and other shell rc files: not mounted
+#
+# Usage:
+#   bwclaude [bwclaude-options] [claude arguments...]
+#   bwclaude --help
+#
+# Options:
+#   --help, -h      Show this help (wrapper options + claude's own help).
+#   --dry-run       Print the bwrap command that would be executed without running it.
+#   --exec CMD      Run CMD inside the sandbox instead of claude.
+#                   Useful for running one-off commands, scripts, or diagnostic tools
+#                   inside the fully-configured sandbox environment.
+#   --init-auth     Persist credentials to host (for first-time setup on personal machines).
+#   --debug         Enable verbose debug logging (ANTHROPIC_LOG=debug, NODE_DEBUG, --debug --verbose).
+#   --new-session   Force bwrap --new-session even on kernels with the TIOCSTI cap
+#                   guard.  Detaches the controlling tty for stricter isolation at the
+#                   cost of SIGWINCH (terminal resize) propagation.
+
+set -euo pipefail
+
+# Source the shared sandbox library.
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+# shellcheck source=../lib/bwrap_sandbox_lib.sh
+source "${SCRIPT_DIR}/../lib/bwrap_sandbox_lib.sh"
+
+# ═══════════════════════════════════════════════════════════════════
+# Tool-specific state
+# ═══════════════════════════════════════════════════════════════════
+
+INIT_AUTH=0
+DEBUG_MODE=0
+
+# ═══════════════════════════════════════════════════════════════════
+# Tool-specific functions
+# ═══════════════════════════════════════════════════════════════════
+
+parse_wrapper_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help | -h)
+                SHOW_HELP=1
+                shift
+                ;;
+            --dry-run)
+                DRY_RUN=1
+                shift
+                ;;
+            --exec)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: --exec requires a command argument." >&2
+                    exit 1
+                fi
+                TEST_CMD="$2"
+                shift 2
+                ;;
+            --init-auth)
+                INIT_AUTH=1
+                shift
+                ;;
+            --debug)
+                DEBUG_MODE=1
+                shift
+                ;;
+            --new-session)
+                # shellcheck disable=SC2034  # consumed by sourced bwrap_sandbox_lib.sh (sandboxed_exec)
+                FORCE_NEW_SESSION=1
+                shift
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+    # shellcheck disable=SC2034  # consumed by library's print_dry_run/launch_sandbox
+    TOOL_ARGS=("$@")
+}
+
+# Find the absolute path to the claude binary on the host so we do
+# not depend on PATH lookup inside the sandbox.
+# Sets globals: _TOOL_BIN, _TOOL_CMD
+resolve_tool_binary() {
+    _TOOL_BIN="$(command -v claude 2> /dev/null || true)"
+    if [[ -z "${_TOOL_BIN}" ]]; then
+        echo "Error: 'claude' not found in PATH." >&2
+        exit 1
+    fi
+
+    if [[ -n "${TEST_CMD}" ]]; then
+        # Split TEST_CMD into array so multi-word commands work correctly.
+        read -ra _TOOL_CMD <<< "${TEST_CMD}"
+    else
+        _TOOL_CMD=("${_TOOL_BIN}")
+    fi
+}
+
+show_help() {
+    cat << 'HELP_EOF'
+bwclaude — Claude CLI inside a bubblewrap sandbox
+
+Wrapper options (consumed before claude sees the command line):
+  -h, --help      Show this message followed by claude's own help.
+  --dry-run       Print the bwrap command that would be run, then exit.
+  --exec CMD      Run CMD inside the fully-configured sandbox instead of claude.
+                  Use this to run scripts, diagnostic tools, or any command with
+                  the same filesystem isolation and environment as claude itself.
+                  Example: bwclaude --exec bash
+                           bwclaude --exec 'env | sort'
+  --init-auth     Persist auth credentials to host (run once on personal machines).
+  --debug         Enable verbose debug logging (sets ANTHROPIC_LOG=debug,
+                  NODE_DEBUG=http,https,tls, and passes --debug --verbose to claude).
+  --new-session   Force bwrap to call setsid(2), detaching the sandbox from the
+                  controlling terminal.  This is the default on older kernels
+                  (< 5.14); on newer kernels we omit it so that SIGWINCH (terminal
+                  resize) propagates from tmux/screen.  Use this flag to opt back
+                  into stricter terminal isolation when SIGWINCH is not important.
+
+All other arguments are passed through to claude unchanged.
+
+Authentication:
+  By default, credentials created inside the sandbox are ephemeral — they work
+  for the current session but are discarded on exit.  This is intentional for
+  shared accounts.  On a personal machine, run once with --init-auth to persist:
+    bwclaude --init-auth
+
+HELP_EOF
+    # Delegate to claude --help inside the sandbox so the user sees the full
+    # claude option set in the same invocation.
+    exec "$0" --exec "${_TOOL_BIN} --help"
+}
+
+resolve_claude_paths() {
+    # Claude home: config, credentials, projects, logs, todos.
+    # Override: CLAUDE_HOME env var.
+    CLAUDE_HOME_DIR="${CLAUDE_HOME:-${_HOME}/.claude}"
+
+    # Claude cache: follows XDG on Linux.
+    # Override: CLAUDE_CACHE_HOME env var.
+    if [[ -n "${CLAUDE_CACHE_HOME:-}" ]]; then
+        CLAUDE_CACHE_DIR="${CLAUDE_CACHE_HOME}"
+    else
+        CLAUDE_CACHE_DIR="${XDG_CACHE_HOME}/claude"
+    fi
+
+    CLAUDE_CREDENTIALS_FILE="${CLAUDE_HOME_DIR}/.credentials.json"
+
+    # State file at $HOME/.claude.json (not inside .claude/) tracks
+    # hasCompletedOnboarding, numStartups, userID, project history.
+    CLAUDE_STATE_FILE="${_HOME}/.claude.json"
+}
+
+# Ensure writable directories exist on host.
+ensure_host_dirs() {
+    mkdir -p "${CLAUDE_HOME_DIR}" "${CLAUDE_CACHE_DIR}"
+    mkdir -p \
+        "${CLAUDE_HOME_DIR}/logs" \
+        "${CLAUDE_HOME_DIR}/projects" \
+        "${CLAUDE_HOME_DIR}/todos" \
+        "${CLAUDE_HOME_DIR}/statsig" \
+        "${CLAUDE_HOME_DIR}/file-history" \
+        "${CLAUDE_HOME_DIR}/sessions"
+    touch "${CLAUDE_HOME_DIR}/history.jsonl" \
+          "${CLAUDE_HOME_DIR}/.last-cleanup"
+}
+
+# ── Claude home (ephemeral tmpfs + selective persistence) ────────
+# Mount the home dir as ephemeral tmpfs, then selectively bind-mount
+# the files and directories that must persist across sessions.
+#
+# Credentials are ephemeral by default — discarded on sandbox exit.
+# This is intentional for shared accounts.  On a personal machine,
+# run with --init-auth once to bootstrap persistent credentials.
+build_claude_home_mount() {
+    # Create intermediate --dir entries if CLAUDE_HOME_DIR is nested under $HOME.
+    if [[ "${CLAUDE_HOME_DIR}" == "${_HOME}"/* ]]; then
+        local _rel="${CLAUDE_HOME_DIR#"${_HOME}"/}"
+        local _accum="${_HOME}"
+        local _parts
+        IFS='/' read -ra _parts <<< "${_rel}"
+        local _i
+        for ((_i = 0; _i < ${#_parts[@]} - 1; _i++)); do
+            _accum="${_accum}/${_parts[$_i]}"
+            BWRAP_ARGS+=(--dir "${_accum}")
+        done
+    fi
+
+    BWRAP_ARGS+=(--tmpfs "${CLAUDE_HOME_DIR}")
+
+    # Persistent read-write directories
+    local _subdir
+    for _subdir in logs projects todos statsig file-history sessions; do
+        BWRAP_ARGS+=(--bind "${CLAUDE_HOME_DIR}/${_subdir}" "${CLAUDE_HOME_DIR}/${_subdir}")
+    done
+
+    # Persistent read-write files
+    local _file
+    for _file in history.jsonl .last-cleanup; do
+        BWRAP_ARGS+=(--bind "${CLAUDE_HOME_DIR}/${_file}" "${CLAUDE_HOME_DIR}/${_file}")
+    done
+
+    local _settings_path="${CLAUDE_HOME_DIR}/settings.json"
+
+    # With --init-auth, create a stub settings.json on the host if none exists,
+    # so it can be bind-mounted read-write and persist across sessions.
+    if [[ "${INIT_AUTH}" -eq 1 ]] && [[ ! -e "${_settings_path}" ]]; then
+        ( umask 022 && printf '{}' > "${_settings_path}" )
+        echo "Created ${_settings_path} — settings will persist after this session." >&2
+    fi
+
+    # settings.json: read-write if it exists (claude may update it during the session)
+    if [[ -e "${_settings_path}" ]]; then
+        BWRAP_ARGS+=(--bind "${_settings_path}" "${_settings_path}")
+    fi
+
+    # Persistent read-only config file (if it exists)
+    local _settings_local_path="${CLAUDE_HOME_DIR}/settings.local.json"
+    if [[ -e "${_settings_local_path}" ]]; then
+        BWRAP_ARGS+=(--ro-bind "${_settings_local_path}" "${_settings_local_path}")
+    fi
+
+    # Credentials: ephemeral by default, persistent with --init-auth.
+    if [[ "${INIT_AUTH}" -eq 1 ]]; then
+        if [[ ! -f "${CLAUDE_CREDENTIALS_FILE}" ]]; then
+            ( umask 077 && printf '{}' > "${CLAUDE_CREDENTIALS_FILE}" )
+            echo "Created ${CLAUDE_CREDENTIALS_FILE} — credentials will persist after this session." >&2
+        fi
+        BWRAP_ARGS+=(--bind "${CLAUDE_CREDENTIALS_FILE}" "${CLAUDE_CREDENTIALS_FILE}")
+    elif [[ -f "${CLAUDE_CREDENTIALS_FILE}" ]]; then
+        # Normal mode: copy credentials into tmpfs via --file so host auth is
+        # available but changes don't persist.
+        local _fd
+        exec {_fd}< "${CLAUDE_CREDENTIALS_FILE}"
+        BWRAP_ARGS+=(--file "${_fd}" "${CLAUDE_CREDENTIALS_FILE}")
+    fi
+
+    # State file (~/.claude.json): bind RW unconditionally.  Contains only
+    # UI/session state (onboarding flags, feature caches, project history) —
+    # not a credential.  Without this, $HOME is tmpfs and claude triggers
+    # the onboarding flow on every invocation.
+    if [[ ! -f "${CLAUDE_STATE_FILE}" ]]; then
+        ( umask 077 && printf '{}' > "${CLAUDE_STATE_FILE}" )
+    fi
+    BWRAP_ARGS+=(--bind "${CLAUDE_STATE_FILE}" "${CLAUDE_STATE_FILE}")
+}
+
+# ── Claude cache (read-write) ────────────────────────────────────
+build_claude_cache_mount() {
+    BWRAP_ARGS+=(--bind "${CLAUDE_CACHE_DIR}" "${CLAUDE_CACHE_DIR}")
+}
+
+# ── Claude env vars ──────────────────────────────────────────────
+build_claude_env() {
+    # Fallback to AIFAPIM_API_KEY if ANTHROPIC_API_KEY is not set
+    if [[ -z "${ANTHROPIC_API_KEY:-}" ]] && [[ -n "${AIFAPIM_API_KEY:-}" ]]; then
+        BWRAP_ARGS+=(--setenv ANTHROPIC_API_KEY "${AIFAPIM_API_KEY}")
+    else
+        pass_through_if_set ANTHROPIC_API_KEY
+    fi
+
+    # Default to hermes endpoint if ANTHROPIC_BASE_URL is not set
+    if [[ -z "${ANTHROPIC_BASE_URL:-}" ]]; then
+        BWRAP_ARGS+=(--setenv ANTHROPIC_BASE_URL "https://hermes.nsls2.bnl.gov/anthropic")
+    else
+        pass_through_if_set ANTHROPIC_BASE_URL
+    fi
+
+    local _key
+    for _key in $(compgen -e); do
+        if [[ "${_key}" == CLAUDE_* ]]; then
+            BWRAP_ARGS+=(--setenv "${_key}" "${!_key}")
+        fi
+    done
+    # Enforce after the loop so host env cannot override this.
+    BWRAP_ARGS+=(--setenv CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS 1)
+
+    # Debug/diagnostic env vars — passed through if set on the host.
+    pass_through_if_set ANTHROPIC_LOG
+    pass_through_if_set NODE_DEBUG
+    pass_through_if_set DEBUG
+
+    # --debug wrapper flag: force verbose logging regardless of host env.
+    if [[ "${DEBUG_MODE}" -eq 1 ]]; then
+        BWRAP_ARGS+=(--setenv ANTHROPIC_LOG debug)
+        BWRAP_ARGS+=(--setenv NODE_DEBUG "http,https,tls")
+        # Prepend --debug --verbose to the args passed to claude.
+        if [[ "${#TOOL_ARGS[@]}" -gt 0 ]]; then
+            TOOL_ARGS=(--debug --verbose "${TOOL_ARGS[@]}")
+        else
+            TOOL_ARGS=(--debug --verbose)
+        fi
+    fi
+}
+
+build_claude_bin_mount() {
+    if [[ -d /opt/claude-code/bin ]]; then
+        BWRAP_ARGS+=(
+            --dir /opt/claude-code
+            --ro-bind /opt/claude-code/bin /opt/claude-code/bin
+        )
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════
+
+main() {
+    parse_wrapper_args "$@"
+    resolve_tool_binary
+
+    if [[ "${SHOW_HELP}" -eq 1 ]]; then
+        show_help
+        # show_help does exec, never returns
+    fi
+
+    detect_bwrap_capabilities
+    detect_kernel_capabilities
+    resolve_common_paths
+    resolve_claude_paths
+    detect_shell
+    ensure_host_dirs
+    parse_all_git_includes
+    init_sandbox_path
+
+    # Build bwrap argument list
+    build_base_sandbox
+    build_binary_masks
+    build_proc_dev_tmp
+    build_etc_mounts
+    build_home_tmpfs
+    build_workdir_mount
+    build_claude_home_mount
+    build_claude_cache_mount
+    build_git_mounts
+    build_pixi_mounts
+    build_ccache_mounts
+    build_npm_mounts
+    build_user_bin_mount
+    build_nsls2_mount
+    build_claude_bin_mount
+    build_dynamic_tool_mounts
+
+    # Environment variables
+    build_env_vars
+    build_claude_env
+
+    # Launch
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+        print_dry_run
+    else
+        launch_sandbox
+    fi
+}
+
+main "$@"

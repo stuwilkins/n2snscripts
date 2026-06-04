@@ -1,0 +1,382 @@
+#!/usr/bin/env bash
+# bwcopilot — Launch GitHub Copilot CLI inside a bubblewrap (bwrap) sandbox.
+#
+# Requires: bwrap >= 0.4.0 (RHEL 8)
+#   - 0.4.0: base functionality
+#   - 0.5.0+: --clearenv (fallback: manual --unsetenv for each host var)
+#   - 0.6.3+: bind over ro-bind (fallback: skip binary masking)
+#
+# The sandbox provides filesystem isolation:
+#   - Current directory: read-write
+#   - Copilot home (~/.copilot or $COPILOT_HOME): tmpfs (ephemeral by default)
+#     - session-state/: bind-mounted read-write (persistent)
+#     - logs/: bind-mounted read-write (persistent)
+#     - skills/: bind-mounted read-write (user-created skill definitions)
+#     - agents/: bind-mounted read-write (user-created custom agents)
+#     - installed-plugins/: bind-mounted read-only (prevents agent from installing plugins)
+#     - config.json: COPIED into tmpfs (host auth available, changes ephemeral)
+#     - Use --init-auth to make config.json persistent (for personal machines)
+#   - Copilot cache (~/.cache/copilot or $COPILOT_CACHE_HOME): read-write
+#   - GitHub CLI auth (~/.config/gh/hosts.yml): read-only (if it exists)
+#   - Git config + includes: read-only
+#   - Pixi cache: read-write
+#   - Pixi config: read-only
+#   - ccache config: read-only
+#   - ccache cache: read-write
+#   - npm config: read-only
+#   - npm cache: read-write
+#   - System and user binaries: read-only
+#   - SSH binaries: masked (ssh, scp, sftp, ssh-agent, etc.)
+#   - Network tools: masked (telnet, nc/ncat, socat, rsync, rsh)
+#   - Kerberos tools: masked (kinit, klist, kdestroy, kswitch)
+#   - Privilege escalation: masked (sudo, su, pkexec)
+#   - Namespace tools: masked (nsenter, unshare, chroot)
+#   - Keyring tools: masked (keyctl)
+#   - SSH/GPG agent env vars: stripped
+#   - ~/.bashrc and other shell rc files: not mounted
+#
+# Known limitation: `copilot --config-dir /some/path` will not work
+# because that path is not mounted in the sandbox.  Parsing copilot's
+# own flags in the wrapper is too brittle — this is accepted as broken.
+# Use COPILOT_HOME instead.
+#
+# Usage:
+#   bwcopilot [bwcopilot-options] [copilot arguments...]
+#   bwcopilot --help
+#
+# Options:
+#   --help, -h      Show this help (wrapper options + copilot's own help).
+#   --dry-run       Print the bwrap command that would be executed without running it.
+#   --exec CMD      Run CMD inside the sandbox instead of copilot.
+#                   Useful for running one-off commands, scripts, or diagnostic tools
+#                   inside the fully-configured sandbox environment.
+#   --init-auth     Persist auth tokens to host (for first-time setup on personal machines).
+#   --new-session   Force bwrap --new-session even on kernels with the TIOCSTI cap
+#                   guard.  Detaches the controlling tty for stricter isolation at the
+#                   cost of SIGWINCH (terminal resize) propagation.
+
+set -euo pipefail
+
+# Source the shared sandbox library.
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+# shellcheck source=../lib/bwrap_sandbox_lib.sh
+source "${SCRIPT_DIR}/../lib/bwrap_sandbox_lib.sh"
+
+# ═══════════════════════════════════════════════════════════════════
+# Tool-specific state
+# ═══════════════════════════════════════════════════════════════════
+
+INIT_AUTH=0
+
+# ═══════════════════════════════════════════════════════════════════
+# Tool-specific functions
+# ═══════════════════════════════════════════════════════════════════
+
+parse_wrapper_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help | -h)
+                SHOW_HELP=1
+                shift
+                ;;
+            --dry-run)
+                DRY_RUN=1
+                shift
+                ;;
+            --exec)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: --exec requires a command argument." >&2
+                    exit 1
+                fi
+                TEST_CMD="$2"
+                shift 2
+                ;;
+            --init-auth)
+                INIT_AUTH=1
+                shift
+                ;;
+            --new-session)
+                # shellcheck disable=SC2034  # consumed by sourced bwrap_sandbox_lib.sh (sandboxed_exec)
+                FORCE_NEW_SESSION=1
+                shift
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+    # shellcheck disable=SC2034  # consumed by library's print_dry_run/launch_sandbox
+    TOOL_ARGS=("$@")
+}
+
+# Find the absolute path to the copilot binary on the host so we do
+# not depend on PATH lookup inside the sandbox.
+# Requires the standalone copilot binary (github/copilot-cli).
+# Does NOT fall back to `gh copilot` — the gh-copilot extension is
+# archived/deprecated as of Oct 2025.
+# Sets globals: _TOOL_BIN, _TOOL_CMD
+resolve_tool_binary() {
+    _TOOL_BIN="$(command -v copilot 2> /dev/null || true)"
+    if [[ -z "${_TOOL_BIN}" ]]; then
+        echo "Error: 'copilot' not found in PATH." >&2
+        echo "Install the standalone GitHub Copilot CLI from https://github.com/github/copilot-cli" >&2
+        exit 1
+    fi
+
+    if [[ -n "${TEST_CMD}" ]]; then
+        # Split TEST_CMD into array so multi-word commands work correctly.
+        read -ra _TOOL_CMD <<< "${TEST_CMD}"
+    else
+        _TOOL_CMD=("${_TOOL_BIN}")
+    fi
+}
+
+show_help() {
+    cat << 'HELP_EOF'
+bwcopilot — GitHub Copilot CLI inside a bubblewrap sandbox
+
+Wrapper options (consumed before copilot sees the command line):
+  -h, --help      Show this message followed by copilot's own help.
+  --dry-run       Print the bwrap command that would be run, then exit.
+  --exec CMD      Run CMD inside the fully-configured sandbox instead of copilot.
+                  Use this to run scripts, diagnostic tools, or any command with
+                  the same filesystem isolation and environment as copilot itself.
+                  Example: bwcopilot --exec bash
+                           bwcopilot --exec 'env | sort'
+  --init-auth     Persist auth tokens to host (run once on personal machines).
+  --new-session   Force bwrap to call setsid(2), detaching the sandbox from the
+                  controlling terminal.  This is the default on older kernels
+                  (< 5.14); on newer kernels we omit it so that SIGWINCH (terminal
+                  resize) propagates from tmux/screen.  Use this flag to opt back
+                  into stricter terminal isolation when SIGWINCH is not important.
+
+All other arguments are passed through to copilot unchanged.
+
+Authentication:
+  copilot uses GitHub credentials.  Authenticate on the host with one of:
+    - gh auth login         (creates ~/.config/gh/hosts.yml, mounted read-only)
+    - export GH_TOKEN=...   (passed through to the sandbox)
+    - /login inside copilot (see note below)
+
+  By default, /login tokens are ephemeral — they work for the current session
+  but are discarded when the sandbox exits.  This is intentional for shared
+  accounts.  On a personal machine, run once with --init-auth to persist auth:
+    bwcopilot --init-auth
+
+Known limitation:
+  copilot --config-dir /path is not supported (that path is not mounted).
+  Use the COPILOT_HOME env var instead.
+
+HELP_EOF
+    # Delegate to copilot --help inside the sandbox so the user sees the full
+    # copilot option set in the same invocation.
+    exec "$0" --exec "${_TOOL_BIN} --help"
+}
+
+# ── Copilot path resolution ─────────────────────────────────────
+
+resolve_copilot_paths() {
+    # Copilot home: config, sessions, logs, SQLite DB, plugins, hooks, agents, skills.
+    # Override: COPILOT_HOME env var or --config-dir flag (flag not supported in sandbox).
+    COPILOT_HOME_DIR="${COPILOT_HOME:-${_HOME}/.copilot}"
+
+    # Copilot cache: follows XDG on Linux.
+    # Override: COPILOT_CACHE_HOME env var.
+    if [[ -n "${COPILOT_CACHE_HOME:-}" ]]; then
+        COPILOT_CACHE_DIR="${COPILOT_CACHE_HOME}"
+    else
+        COPILOT_CACHE_DIR="${XDG_CACHE_HOME}/copilot"
+    fi
+
+    # GitHub CLI auth file (just this file, NOT the entire ~/.config/gh/ directory).
+    GH_HOSTS_FILE="${XDG_CONFIG_HOME}/gh/hosts.yml"
+
+    # Paths within COPILOT_HOME_DIR for selective mounting
+    COPILOT_CONFIG_FILE="${COPILOT_HOME_DIR}/config.json"
+    COPILOT_SESSION_DIR="${COPILOT_HOME_DIR}/session-state"
+    COPILOT_LOGS_DIR="${COPILOT_HOME_DIR}/logs"
+}
+
+# Ensure writable directories exist on host.
+ensure_host_dirs() {
+    mkdir -p "${COPILOT_HOME_DIR}" "${COPILOT_CACHE_DIR}"
+    # Create persistent subdirectories for bind-mounts
+    mkdir -p "${COPILOT_SESSION_DIR}" "${COPILOT_LOGS_DIR}"
+    # Create user-writable customization directories
+    mkdir -p "${COPILOT_HOME_DIR}/skills" "${COPILOT_HOME_DIR}/agents"
+}
+
+# ── Copilot home (ephemeral tmpfs + selective persistence) ──────
+# Mount the home dir as ephemeral tmpfs, then selectively bind-mount
+# the files and directories that must persist across sessions.
+#
+# config.json is COPIED (not bind-mounted) into the tmpfs so the user's
+# existing auth is available, but any changes (including /login) do NOT
+# persist to the host.  This is the desired behaviour for shared accounts.
+# On a personal account, run with --init-auth once to create persistent
+# auth, then subsequent runs will use the persisted tokens.
+#
+# Persistent read-write:
+#   - session-state/: per-session checkpoints, events, database
+#   - logs/: process logs
+#   - skills/: user-created skill definitions (SKILL.md files)
+#   - agents/: user-created custom agent profiles (*.agent.md files)
+#
+# Persistent read-only:
+#   - mcp-config.json, lsp-config.json: user preferences (if they exist)
+#   - installed-plugins/: plugins installed via `copilot plugin install`
+#
+# Ephemeral (not persisted):
+#   - config.json: contains auth tokens that should not leak out
+#   - command-history-state.json, ide/: transient state
+build_copilot_home_mount() {
+    # Create intermediate directories for paths under $HOME in the tmpfs.
+    if [[ "${COPILOT_HOME_DIR}" == "${_HOME}"/* ]]; then
+        local _rel="${COPILOT_HOME_DIR#"${_HOME}"/}"
+        local _accum="${_HOME}"
+        local _parts
+        IFS='/' read -ra _parts <<< "${_rel}"
+        local _i
+        for ((_i = 0; _i < ${#_parts[@]} - 1; _i++)); do
+            _accum="${_accum}/${_parts[$_i]}"
+            BWRAP_ARGS+=(--dir "${_accum}")
+        done
+    fi
+
+    # Mount COPILOT_HOME as tmpfs (ephemeral by default)
+    BWRAP_ARGS+=(--tmpfs "${COPILOT_HOME_DIR}")
+
+    # Bind-mount persistent directories
+    local _subdir
+    for _subdir in session-state logs; do
+        BWRAP_ARGS+=(--bind "${COPILOT_HOME_DIR}/${_subdir}" "${COPILOT_HOME_DIR}/${_subdir}")
+    done
+
+    # Bind-mount persistent config files (read-only)
+    local _cfg
+    for _cfg in mcp-config.json lsp-config.json installed-plugins; do
+        local _path="${COPILOT_HOME_DIR}/${_cfg}"
+        if [[ -e "${_path}" ]]; then
+            BWRAP_ARGS+=(--ro-bind "${_path}" "${_path}")
+        fi
+    done
+
+    # Bind-mount user-writable customization directories (read-write)
+    # Skills and agents are user-created files, not installed packages.
+    for _cfg in skills agents; do
+        local _path="${COPILOT_HOME_DIR}/${_cfg}"
+        if [[ -e "${_path}" ]]; then
+            BWRAP_ARGS+=(--bind "${_path}" "${_path}")
+        fi
+    done
+
+    # Handle config.json: copy or bind depending on --init-auth
+    if [[ "${INIT_AUTH}" -eq 1 ]]; then
+        # --init-auth: bind-mount config.json so changes persist
+        if [[ ! -f "${COPILOT_CONFIG_FILE}" ]]; then
+            ( umask 077 && printf '{"banner": "never"}\n' > "${COPILOT_CONFIG_FILE}" )
+            echo "Created ${COPILOT_CONFIG_FILE} — auth tokens will persist after this session." >&2
+        fi
+        BWRAP_ARGS+=(--bind "${COPILOT_CONFIG_FILE}" "${COPILOT_CONFIG_FILE}")
+    elif [[ -f "${COPILOT_CONFIG_FILE}" ]]; then
+        # Normal mode: copy config.json into tmpfs via --file
+        # This makes host auth available but changes don't persist
+        local _fd
+        exec {_fd}< "${COPILOT_CONFIG_FILE}"
+        BWRAP_ARGS+=(--file "${_fd}" "${COPILOT_CONFIG_FILE}")
+        # Note: fd stays open until bwrap exec's, then it's inherited and used
+    fi
+}
+
+# ── Copilot cache (read-write) ──────────────────────────────────
+build_copilot_cache_mount() {
+    BWRAP_ARGS+=(--bind "${COPILOT_CACHE_DIR}" "${COPILOT_CACHE_DIR}")
+}
+
+# ── GitHub CLI auth (read-only) ──────────────────────────────────
+# Mount just ~/.config/gh/hosts.yml so copilot can read GitHub tokens
+# from `gh auth login`.  We do NOT mount the entire ~/.config/gh/
+# directory to avoid leaking other gh config.
+build_gh_auth_mount() {
+    [[ -f "${GH_HOSTS_FILE}" ]] || return 0
+
+    BWRAP_ARGS+=(
+        --dir "${XDG_CONFIG_HOME}/gh"
+        --ro-bind "${GH_HOSTS_FILE}" "${GH_HOSTS_FILE}"
+    )
+}
+
+# ── Copilot env vars ────────────────────────────────────────────
+build_copilot_env() {
+    # Auth tokens
+    pass_through_if_set GH_TOKEN
+    pass_through_if_set GITHUB_TOKEN
+    pass_through_if_set GH_HOST
+
+    # Copilot config
+    pass_through_if_set COPILOT_HOME
+    pass_through_if_set COPILOT_CACHE_HOME
+    pass_through_if_set COPILOT_MODEL
+
+    # Pass through any COPILOT_PROVIDER_* env vars
+    local _key
+    for _key in $(compgen -e); do
+        if [[ "${_key}" == COPILOT_PROVIDER_* ]]; then
+            BWRAP_ARGS+=(--setenv "${_key}" "${!_key}")
+        fi
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════
+
+main() {
+    parse_wrapper_args "$@"
+    resolve_tool_binary
+
+    if [[ "${SHOW_HELP}" -eq 1 ]]; then
+        show_help
+        # show_help does exec, never returns
+    fi
+
+    detect_bwrap_capabilities
+    detect_kernel_capabilities
+    resolve_common_paths
+    resolve_copilot_paths
+    detect_shell
+    ensure_host_dirs
+    parse_all_git_includes
+    init_sandbox_path
+
+    # Build bwrap argument list
+    build_base_sandbox
+    build_binary_masks
+    build_proc_dev_tmp
+    build_etc_mounts
+    build_home_tmpfs
+    build_workdir_mount
+    build_copilot_home_mount
+    build_copilot_cache_mount
+    build_gh_auth_mount
+    build_git_mounts
+    build_pixi_mounts
+    build_ccache_mounts
+    build_npm_mounts
+    build_user_bin_mount
+    build_nsls2_mount
+    build_dynamic_tool_mounts
+
+    # Environment variables
+    build_env_vars
+    build_copilot_env
+
+    # Launch
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+        print_dry_run
+    else
+        launch_sandbox
+    fi
+}
+
+main "$@"
