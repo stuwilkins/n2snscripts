@@ -50,6 +50,15 @@
 #   --new-session   Force bwrap --new-session even on kernels with the TIOCSTI cap
 #                   guard.  Detaches the controlling tty for stricter isolation at the
 #                   cost of SIGWINCH (terminal resize) propagation.
+#   --ro-path PATH  Mount PATH read-only into the sandbox.  May be repeated to
+#                   accumulate multiple paths.  Dangerous paths are blocked:
+#                   $HOME and ancestors, ~/.ssh, ~/.gnupg, ~/.aws, ~/.kube,
+#                   ~/.docker, ~/.netrc, ~/.pypirc, ~/.rattler, ~/.yarnrc,
+#                   ~/.yarnrc.yml, ~/.yarn, ~/.config/gh,
+#                   $XDG_DATA_HOME/uv/credentials, /root, /etc/shadow,
+#                   /etc/sudoers{,.d}.
+#   --rw-path PATH  Mount PATH read-write into the sandbox.  May be repeated to
+#                   accumulate multiple paths.  Same blocked-path rules as --ro-path.
 
 set -euo pipefail
 
@@ -96,6 +105,22 @@ parse_wrapper_args() {
                 # shellcheck disable=SC2034  # consumed by sourced bwrap_sandbox_lib.sh (sandboxed_exec)
                 FORCE_NEW_SESSION=1
                 shift
+                ;;
+            --ro-path)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: --ro-path requires a path argument." >&2
+                    exit 1
+                fi
+                EXTRA_RO_PATHS+=("$2")
+                shift 2
+                ;;
+            --rw-path)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: --rw-path requires a path argument." >&2
+                    exit 1
+                fi
+                EXTRA_RW_PATHS+=("$2")
+                shift 2
                 ;;
             *)
                 break
@@ -144,6 +169,16 @@ Wrapper options (consumed before opencode sees the command line):
                   (< 5.14); on newer kernels we omit it so that SIGWINCH (terminal
                   resize) propagates from tmux/screen.  Use this flag to opt back
                   into stricter terminal isolation when SIGWINCH is not important.
+  --ro-path PATH  Mount PATH (file or directory) read-only into the sandbox.
+                  May be repeated to accumulate multiple extra paths.
+                  Blocked: $HOME and ancestors, ~/.ssh, ~/.gnupg, ~/.aws,
+                  ~/.kube, ~/.docker, ~/.netrc, ~/.pypirc, ~/.rattler,
+                  ~/.yarnrc, ~/.yarnrc.yml, ~/.yarn, ~/.config/gh,
+                  $XDG_DATA_HOME/uv/credentials, /root, /etc/shadow,
+                  /etc/sudoers{,.d}.
+                  Symlinks are resolved before the safety check is applied.
+  --rw-path PATH  Mount PATH (file or directory) read-write into the sandbox.
+                  Same blocked-path rules as --ro-path.  May be repeated.
 
 All other arguments are passed through to opencode unchanged.
 
@@ -160,6 +195,15 @@ resolve_opencode_paths() {
     OC_DATA_DIR="${XDG_DATA_HOME}/opencode"
     OC_CACHE_DIR="${XDG_CACHE_HOME}/opencode"
     OC_AUTH_FILE="${OC_DATA_DIR}/auth.json"
+
+    # Validate the user-controllable root directories once here so that all
+    # sub-path mounts derived from them are implicitly covered.
+    # XDG_CONFIG_HOME, XDG_DATA_HOME, and XDG_CACHE_HOME are already checked
+    # in resolve_common_paths; checking the opencode subdirs covers the case
+    # where someone has set those XDG vars to a parent of a blocked path and
+    # 'opencode' happens to be a path component that lands inside the block.
+    _check_dir_safe "${OC_DATA_DIR}"   "XDG_DATA_HOME (opencode data)"
+    _check_dir_safe "${OC_CACHE_DIR}"  "XDG_CACHE_HOME (opencode cache)"
 }
 
 # Ensure writable directories and files exist on host.
@@ -185,6 +229,10 @@ ensure_host_dirs() {
 # pointing outside (e.g. into a dotfiles repo) are followed, and we
 # bind the real file at the expected path.  This avoids exposing the
 # dotfiles tree inside the sandbox.
+#
+# Each resolved target is passed through _check_path_safe before being
+# added to OC_CONFIG_BINDS.  This blocks symlinks that point into
+# sensitive subtrees (e.g. ~/.config/opencode/creds -> ~/.aws/credentials).
 resolve_config_symlinks() {
     OC_CONFIG_BINDS=()
     [[ -d "${OC_CONFIG_DIR}" ]] || return 0
@@ -197,6 +245,7 @@ resolve_config_symlinks() {
         else
             local_resolved="${entry}"
         fi
+        _check_path_safe "${local_resolved}" "opencode config entry '${entry}'"
         OC_CONFIG_BINDS+=("--ro-bind" "${local_resolved}" "${entry}")
     done
 }
@@ -372,6 +421,7 @@ main() {
     build_user_bin_mount
     build_nsls2_mount
     build_dynamic_tool_mounts
+    build_extra_path_mounts
 
     # Environment variables
     build_env_vars

@@ -54,6 +54,15 @@
 #   --new-session   Force bwrap --new-session even on kernels with the TIOCSTI cap
 #                   guard.  Detaches the controlling tty for stricter isolation at the
 #                   cost of SIGWINCH (terminal resize) propagation.
+#   --ro-path PATH  Mount PATH read-only into the sandbox.  May be repeated to
+#                   accumulate multiple paths.  Dangerous paths are blocked:
+#                   $HOME and ancestors, ~/.ssh, ~/.gnupg, ~/.aws, ~/.kube,
+#                   ~/.docker, ~/.netrc, ~/.pypirc, ~/.rattler, ~/.yarnrc,
+#                   ~/.yarnrc.yml, ~/.yarn, ~/.config/gh,
+#                   $XDG_DATA_HOME/uv/credentials, /root, /etc/shadow,
+#                   /etc/sudoers{,.d}.
+#   --rw-path PATH  Mount PATH read-write into the sandbox.  May be repeated to
+#                   accumulate multiple paths.  Same blocked-path rules as --ro-path.
 
 set -euo pipefail
 
@@ -99,6 +108,22 @@ parse_wrapper_args() {
                 # shellcheck disable=SC2034  # consumed by sourced bwrap_sandbox_lib.sh (sandboxed_exec)
                 FORCE_NEW_SESSION=1
                 shift
+                ;;
+            --ro-path)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: --ro-path requires a path argument." >&2
+                    exit 1
+                fi
+                EXTRA_RO_PATHS+=("$2")
+                shift 2
+                ;;
+            --rw-path)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: --rw-path requires a path argument." >&2
+                    exit 1
+                fi
+                EXTRA_RW_PATHS+=("$2")
+                shift 2
                 ;;
             *)
                 break
@@ -149,6 +174,16 @@ Wrapper options (consumed before copilot sees the command line):
                   (< 5.14); on newer kernels we omit it so that SIGWINCH (terminal
                   resize) propagates from tmux/screen.  Use this flag to opt back
                   into stricter terminal isolation when SIGWINCH is not important.
+  --ro-path PATH  Mount PATH (file or directory) read-only into the sandbox.
+                  May be repeated to accumulate multiple extra paths.
+                  Blocked: $HOME and ancestors, ~/.ssh, ~/.gnupg, ~/.aws,
+                  ~/.kube, ~/.docker, ~/.netrc, ~/.pypirc, ~/.rattler,
+                  ~/.yarnrc, ~/.yarnrc.yml, ~/.yarn, ~/.config/gh,
+                  $XDG_DATA_HOME/uv/credentials, /root, /etc/shadow,
+                  /etc/sudoers{,.d}.
+                  Symlinks are resolved before the safety check is applied.
+  --rw-path PATH  Mount PATH (file or directory) read-write into the sandbox.
+                  Same blocked-path rules as --ro-path.  May be repeated.
 
 All other arguments are passed through to copilot unchanged.
 
@@ -195,6 +230,11 @@ resolve_copilot_paths() {
     COPILOT_CONFIG_FILE="${COPILOT_HOME_DIR}/config.json"
     COPILOT_SESSION_DIR="${COPILOT_HOME_DIR}/session-state"
     COPILOT_LOGS_DIR="${COPILOT_HOME_DIR}/logs"
+
+    # Validate the user-controllable root directories once here so that all
+    # sub-path mounts derived from them are implicitly covered.
+    _check_dir_safe "${COPILOT_HOME_DIR}"  "COPILOT_HOME"
+    _check_dir_safe "${COPILOT_CACHE_DIR}" "COPILOT_CACHE_HOME"
 }
 
 # Ensure writable directories exist on host.
@@ -297,6 +337,15 @@ build_copilot_cache_mount() {
 # Mount just ~/.config/gh/hosts.yml so copilot can read GitHub tokens
 # from `gh auth login`.  We do NOT mount the entire ~/.config/gh/
 # directory to avoid leaking other gh config.
+#
+# INTENTIONAL BYPASS: GH_HOSTS_FILE resolves to a path inside
+# ~/.config/gh/, which is listed in _BLOCKED_PREFIXES in _check_path_safe.
+# That block prevents USER-supplied --ro-path/--rw-path arguments from
+# reaching gh credentials in wrappers that have no business reading them
+# (bwclaude, bwcodex, bwopencode).  Here we intentionally mount exactly
+# one file from that directory because copilot requires gh auth to function.
+# We do NOT call _check_path_safe on GH_HOSTS_FILE — the mount is
+# deliberate, narrow (single file, read-only), and documented.
 build_gh_auth_mount() {
     [[ -f "${GH_HOSTS_FILE}" ]] || return 0
 
@@ -366,6 +415,7 @@ main() {
     build_user_bin_mount
     build_nsls2_mount
     build_dynamic_tool_mounts
+    build_extra_path_mounts
 
     # Environment variables
     build_env_vars

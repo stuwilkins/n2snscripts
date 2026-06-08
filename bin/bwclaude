@@ -56,6 +56,15 @@
 #   --new-session   Force bwrap --new-session even on kernels with the TIOCSTI cap
 #                   guard.  Detaches the controlling tty for stricter isolation at the
 #                   cost of SIGWINCH (terminal resize) propagation.
+#   --ro-path PATH  Mount PATH read-only into the sandbox.  May be repeated to
+#                   accumulate multiple paths.  Dangerous paths are blocked:
+#                   $HOME and ancestors, ~/.ssh, ~/.gnupg, ~/.aws, ~/.kube,
+#                   ~/.docker, ~/.netrc, ~/.pypirc, ~/.rattler, ~/.yarnrc,
+#                   ~/.yarnrc.yml, ~/.yarn, ~/.config/gh,
+#                   $XDG_DATA_HOME/uv/credentials, /root, /etc/shadow,
+#                   /etc/sudoers{,.d}.
+#   --rw-path PATH  Mount PATH read-write into the sandbox.  May be repeated to
+#                   accumulate multiple paths.  Same blocked-path rules as --ro-path.
 
 set -euo pipefail
 
@@ -107,6 +116,22 @@ parse_wrapper_args() {
                 FORCE_NEW_SESSION=1
                 shift
                 ;;
+            --ro-path)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: --ro-path requires a path argument." >&2
+                    exit 1
+                fi
+                EXTRA_RO_PATHS+=("$2")
+                shift 2
+                ;;
+            --rw-path)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: --rw-path requires a path argument." >&2
+                    exit 1
+                fi
+                EXTRA_RW_PATHS+=("$2")
+                shift 2
+                ;;
             *)
                 break
                 ;;
@@ -154,6 +179,16 @@ Wrapper options (consumed before claude sees the command line):
                   (< 5.14); on newer kernels we omit it so that SIGWINCH (terminal
                   resize) propagates from tmux/screen.  Use this flag to opt back
                   into stricter terminal isolation when SIGWINCH is not important.
+  --ro-path PATH  Mount PATH (file or directory) read-only into the sandbox.
+                  May be repeated to accumulate multiple extra paths.
+                  Blocked: $HOME and ancestors, ~/.ssh, ~/.gnupg, ~/.aws,
+                  ~/.kube, ~/.docker, ~/.netrc, ~/.pypirc, ~/.rattler,
+                  ~/.yarnrc, ~/.yarnrc.yml, ~/.yarn, ~/.config/gh,
+                  $XDG_DATA_HOME/uv/credentials, /root, /etc/shadow,
+                  /etc/sudoers{,.d}.
+                  Symlinks are resolved before the safety check is applied.
+  --rw-path PATH  Mount PATH (file or directory) read-write into the sandbox.
+                  Same blocked-path rules as --ro-path.  May be repeated.
 
 All other arguments are passed through to claude unchanged.
 
@@ -187,6 +222,11 @@ resolve_claude_paths() {
     # State file at $HOME/.claude.json (not inside .claude/) tracks
     # hasCompletedOnboarding, numStartups, userID, project history.
     CLAUDE_STATE_FILE="${_HOME}/.claude.json"
+
+    # Validate the user-controllable root directories once here so that all
+    # sub-path mounts derived from them are implicitly covered.
+    _check_dir_safe "${CLAUDE_HOME_DIR}"  "CLAUDE_HOME"
+    _check_dir_safe "${CLAUDE_CACHE_DIR}" "CLAUDE_CACHE_HOME"
 }
 
 # Ensure writable directories exist on host.
@@ -379,6 +419,7 @@ main() {
     build_nsls2_mount
     build_claude_bin_mount
     build_dynamic_tool_mounts
+    build_extra_path_mounts
 
     # Environment variables
     build_env_vars
