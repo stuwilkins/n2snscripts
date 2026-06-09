@@ -9,33 +9,29 @@ on managed hosts via the Ansible base role.
 bin/    Executable wrappers (sandboxed AI CLI tools, etc.)
 lib/    Sourced shell libraries
 etc/    Configuration assets (reserved)
+docs/   Per-script and per-library documentation
 ```
 
 ## Contents
 
 ### `bin/`
 
-The `bw*` wrappers enforce NSLS-II sandboxing policy (managed config,
-masked privileged binaries, ephemeral auth on shared accounts). See the
-NSLS-II coding-agents documentation for the policy these wrappers
-implement.
+| Script | Purpose | Docs |
+| --- | --- | --- |
+| `bwclaude`          | Claude CLI in a bubblewrap sandbox          | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
+| `bwcodex`           | OpenAI Codex CLI in a bubblewrap sandbox    | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
+| `bwcopilot`         | GitHub Copilot CLI in a bubblewrap sandbox  | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
+| `bwopencode`        | OpenCode in a bubblewrap sandbox            | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
+| `gh-protect-branch` | Apply NSLS-II standard branch protection to a GitHub repo (all branches); enables secret scanning and push protection | [docs/gh-protect-branch.md](docs/gh-protect-branch.md) |
 
-| Script | Purpose |
-| --- | --- |
-| `bwclaude` | Run the Claude CLI inside a bubblewrap sandbox |
-| `bwcopilot` | Run the GitHub Copilot CLI inside a bubblewrap sandbox |
-| `bwopencode` | Run OpenCode inside a bubblewrap sandbox |
-| `bwcodex` | Run Codex inside a bubblewrap sandbox |
-
-All four wrappers share `lib/bwrap_sandbox_lib.sh` for sandbox construction.
-See each script's `--help` for tool-specific options.
+All `bw*` wrappers share `lib/bwrap_sandbox_lib.sh` for sandbox construction.
 
 ### `lib/`
 
-| Library | Purpose |
-| --- | --- |
-| `bwrap_sandbox_lib.sh` | Shared sandbox-building primitives used by the `bw*` wrappers |
-| `gpg-passwd.sh` | `decrypt_env_file` helper for sourcing GPG-encrypted env files |
+| Library | Purpose | Docs |
+| --- | --- | --- |
+| `bwrap_sandbox_lib.sh` | Shared sandbox-building primitives for `bw*` wrappers | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
+| `gpg-passwd.sh`        | `decrypt_env_file` helper for GPG-encrypted env files | [docs/gpg-passwd.md](docs/gpg-passwd.md) |
 
 These libraries are sourced, not executed. Each library's header comment
 documents its public function surface.
@@ -65,13 +61,6 @@ export PATH="${N2SNSCRIPTS_BIN}:${PATH}"
 
 Add those three exports to your `~/.bashrc` or `~/.zshrc` for persistence.
 
-Alternately, if `~/.local/bin` is already in your path
-
-```bash
-stow -t ~/.local -S n2snscripts --ignore='etc' --ignore=README.md
-```
-
-
 ## Requirements
 
 - `bash` >= 4.x (the `bw*` wrappers use `[[ ]]` and arrays)
@@ -79,46 +68,7 @@ stow -t ~/.local -S n2snscripts --ignore='etc' --ignore=README.md
   - 0.5.0+ enables `--clearenv`
   - 0.6.3+ enables bind-over-ro-bind binary masking
 - `gpg(1)` for `gpg-passwd.sh`
+- `gh(1)` authenticated with `admin:repo` scope for `gh-protect-branch`
 
-## Usage
-
-### `bw*` sandboxed CLI wrappers
-
-```text
-bwopencode [bwopencode-options] [opencode arguments...]
-bwclaude   [bwclaude-options]   [claude arguments...]
-bwcopilot  [bwcopilot-options]  [copilot arguments...]
-bwcodex    [bwcodex-options]    [codex arguments...]
-```
-
-Common wrapper options:
-
-| Option | Effect |
-| --- | --- |
-| `--help`, `-h` | Show wrapper help plus the underlying tool's help |
-| `--dry-run` | Print the `bwrap` command without executing it |
-| `--exec CMD` | Run `CMD` inside the sandbox instead of the tool |
-| `--init-auth` | Persist auth credentials to the host (first-time setup) |
-| `--new-session` | Force `bwrap --new-session` (stricter isolation; breaks SIGWINCH) |
-
-`bwclaude` also supports `--debug`. See each script's `--help` for the
-authoritative option list.
-
-### `gpg-passwd.sh`
-
-Source the library and call `decrypt_env_file`:
-
-```bash
-source "${N2SNSCRIPTS_LIB}/gpg-passwd.sh"
-decrypt_env_file "$HOME/.private_env.gpg" AIFAPIM_HOST AIFAPIM_API_KEY
-```
-
-Behaviour:
-
-- Decrypts the file with `gpg --quiet --batch --yes --decrypt` and `eval`s
-  the result into the current shell.
-- Returns `0` on success, `0` (with warning) if the file is missing,
-  `2` if a required variable is still empty after decrypt, `3` if `gpg`
-  fails.
-
-See the library header for the full contract.
+See the per-script doc pages under [`docs/`](docs/) for full usage,
+options, and caveats.

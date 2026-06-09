@@ -1,0 +1,116 @@
+# `bw*` sandboxed CLI wrappers
+
+The `bw*` wrappers in `bin/` run AI CLI tools inside a [bubblewrap][bwrap]
+(`bwrap`) sandbox to enforce NSLS-II sandboxing policy: managed config,
+masked privileged binaries, ephemeral auth on shared accounts, and
+filesystem isolation from the rest of the host. See the NSLS-II
+coding-agents documentation for the policy these wrappers implement.
+
+All four wrappers source the shared library `lib/bwrap_sandbox_lib.sh`
+for sandbox construction. Each wrapper's `--help` is the authoritative
+option list; the tables below summarise the common surface.
+
+[bwrap]: https://github.com/containers/bubblewrap
+
+## Requirements
+
+- `bash` >= 4.x (the wrappers use `[[ ]]` and arrays)
+- `bubblewrap` (`bwrap`) >= 0.4.0
+  - 0.5.0+ enables `--clearenv`
+  - 0.6.3+ enables bind-over-ro-bind binary masking
+
+## Common options
+
+Every `bw*` wrapper accepts these options:
+
+| Option | Effect |
+| --- | --- |
+| `--help`, `-h` | Show wrapper help plus the underlying tool's help |
+| `--dry-run` | Print the `bwrap` command without executing it |
+| `--exec CMD` | Run `CMD` inside the sandbox instead of the tool |
+| `--init-auth` | Persist auth credentials to the host (first-time setup) |
+| `--new-session` | Force `bwrap --new-session` (stricter isolation; breaks SIGWINCH) |
+
+Tool-specific options are listed in each wrapper's section below.
+
+## `bwopencode`
+
+Launches [opencode](https://opencode.ai) inside a bubblewrap sandbox.
+
+```text
+bwopencode [bwopencode-options] [opencode arguments...]
+```
+
+Persists database, logs, snapshots, storage, tool-output, and
+project-dotfiles to the host data dir; `auth.json` is persisted only if
+it already exists on the host (use `--init-auth` once to create it for
+personal accounts).
+
+No options beyond the common set.
+
+## `bwclaude`
+
+Launches the [Claude CLI](https://docs.claude.com/en/docs/claude-code/overview) inside a bubblewrap sandbox.
+
+```text
+bwclaude [bwclaude-options] [claude arguments...]
+```
+
+Additional options:
+
+| Option | Effect |
+| --- | --- |
+| `--debug` | Enable verbose debug logging: sets `ANTHROPIC_LOG=debug`, `NODE_DEBUG=http,https,tls`, and passes `--debug --verbose` to `claude` |
+
+On shared accounts, auth is ephemeral. On a personal machine, run
+`bwclaude --init-auth` once to persist credentials.
+
+## `bwcopilot`
+
+Launches the [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli/about-github-copilot-in-the-cli)
+inside a bubblewrap sandbox.
+
+```text
+bwcopilot [bwcopilot-options] [copilot arguments...]
+```
+
+No options beyond the common set.
+
+On shared accounts, auth tokens are ephemeral. On a personal machine,
+run `bwcopilot --init-auth` once to persist tokens.
+
+## `bwcodex`
+
+Launches the [OpenAI Codex CLI](https://github.com/openai/codex) inside
+a bubblewrap sandbox.
+
+```text
+bwcodex [bwcodex-options] [codex arguments...]
+```
+
+Two approved auth paths (configured in `~/.codex/config.toml`):
+
+- **Hermes (AIFAPIM) routing** — provider block points at
+  `https://hermes.nsls2.bnl.gov/openai/v1` with `x-api-key` header; the
+  wrapper plumbs `AIFAPIM_HOST` and `AIFAPIM_API_KEY` through.
+- **BNL ITD ChatGPT subscription** — `codex login` OAuth flow persists
+  tokens to `~/.codex/auth.json`. Run once with `--init-auth` to make
+  that file persist across sandbox invocations.
+
+Additional options:
+
+| Option | Effect |
+| --- | --- |
+| `--debug` | Enable verbose Codex logging (sets `RUST_LOG=debug`) |
+| `--persist-config` | Bind-mount `~/.codex/config.toml` read-write into the sandbox so changes (e.g. project-trust grants) persist across sessions. Without this flag, `config.toml` is staged read-write into a per-session copy that is discarded on exit. Concurrent `--persist-config` sessions may race on writes |
+
+Note: Codex CLI also enforces its own inner Landlock-based sandbox for
+agent tool calls. The outer `bwrap` here is complementary — it scopes
+the entire Codex process tree, not just agent-issued commands.
+
+## `lib/bwrap_sandbox_lib.sh`
+
+Shared sandbox-building primitives sourced by all `bw*` wrappers. Not
+intended to be executed directly. The library header documents the
+public function surface (sandbox construction, dynamic mount discovery,
+binary masking, environment scrubbing).
