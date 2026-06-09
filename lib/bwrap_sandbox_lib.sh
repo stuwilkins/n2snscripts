@@ -260,7 +260,7 @@ _mount_npm_global_prefix() {
     # Canonicalise before the safety check so symlinks in the prefix path
     # are resolved (npm itself may return a non-canonical path on some systems).
     local npm_prefix_canon
-    npm_prefix_canon="$(readlink -f "${npm_prefix}" 2>/dev/null || echo "${npm_prefix}")"
+    npm_prefix_canon="$(readlink -f "${npm_prefix}" 2> /dev/null || echo "${npm_prefix}")"
     _check_path_safe "${npm_prefix_canon}" "npm global prefix"
 
     _mount_ro_dir_if_needed "${npm_prefix_canon}"
@@ -468,7 +468,7 @@ _check_dir_safe() {
     local context="$2"
     local canon
     if [[ -e "${path}" ]]; then
-        canon="$(readlink -f "${path}" 2>/dev/null || echo "${path}")"
+        canon="$(readlink -f "${path}" 2> /dev/null || echo "${path}")"
     else
         canon="${path}"
     fi
@@ -499,7 +499,7 @@ validate_extra_path() {
 
     # Resolve to canonical path (follows symlinks, removes . and ..).
     local canon
-    canon="$(readlink -f "${expanded_path}" 2>/dev/null || true)"
+    canon="$(readlink -f "${expanded_path}" 2> /dev/null || true)"
 
     # ── Existence check ──────────────────────────────────────────
     if [[ -z "${canon}" ]] || ! [[ -e "${canon}" ]]; then
