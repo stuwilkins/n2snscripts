@@ -760,7 +760,7 @@ build_binary_masks() {
         # SSH
         ssh scp sftp ssh-agent ssh-add ssh-keygen ssh-keyscan
         # Network
-        telnet nc ncat netcat socat rsync rsh rlogin rexec
+        telnet nc ncat netcat rsync rsh rlogin rexec
         # Kerberos
         kinit klist kdestroy kswitch
         # Keyring
