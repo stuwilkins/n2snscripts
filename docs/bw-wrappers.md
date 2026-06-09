@@ -56,6 +56,21 @@ Launches the [Claude CLI](https://docs.claude.com/en/docs/claude-code/overview) 
 bwclaude [bwclaude-options] [claude arguments...]
 ```
 
+Routes through the NSLS-II Hermes (AIFAPIM) gateway in Azure AI Foundry
+mode. The wrapper forces `CLAUDE_CODE_USE_FOUNDRY=1` and plumbs:
+
+- **`ANTHROPIC_FOUNDRY_BASE_URL`** — defaults to
+  `https://hermes.nsls2.bnl.gov/anthropic`; override by exporting
+  `ANTHROPIC_FOUNDRY_BASE_URL` on the host.
+- **`ANTHROPIC_FOUNDRY_API_KEY`** — taken from the host's
+  `ANTHROPIC_FOUNDRY_API_KEY` if set, otherwise from `AIFAPIM_API_KEY`
+  (the existing NSLS-II convention). If neither is set, the wrapper
+  refuses to start with a clear error message rather than letting Claude
+  Code fall back to the Azure SDK credential chain.
+
+The legacy `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` env vars are *not*
+honored in foundry mode and the wrapper no longer sets them.
+
 Additional options:
 
 | Option | Effect |

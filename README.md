@@ -18,10 +18,10 @@ docs/   Per-script and per-library documentation
 
 | Script | Purpose | Docs |
 | --- | --- | --- |
-| `bwclaude`          | Claude CLI in a bubblewrap sandbox          | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
-| `bwcodex`           | OpenAI Codex CLI in a bubblewrap sandbox    | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
-| `bwcopilot`         | GitHub Copilot CLI in a bubblewrap sandbox  | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
-| `bwopencode`        | OpenCode in a bubblewrap sandbox            | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
+| `bwclaude` | Claude CLI in a bubblewrap sandbox | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
+| `bwcodex` | OpenAI Codex CLI in a bubblewrap sandbox | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
+| `bwcopilot` | GitHub Copilot CLI in a bubblewrap sandbox | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
+| `bwopencode` | OpenCode in a bubblewrap sandbox | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
 | `gh-protect-branch` | Apply NSLS-II standard branch protection to a GitHub repo (all branches); enables secret scanning and push protection | [docs/gh-protect-branch.md](docs/gh-protect-branch.md) |
 
 All `bw*` wrappers share `lib/bwrap_sandbox_lib.sh` for sandbox construction.
@@ -31,7 +31,7 @@ All `bw*` wrappers share `lib/bwrap_sandbox_lib.sh` for sandbox construction.
 | Library | Purpose | Docs |
 | --- | --- | --- |
 | `bwrap_sandbox_lib.sh` | Shared sandbox-building primitives for `bw*` wrappers | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
-| `gpg-passwd.sh`        | `decrypt_env_file` helper for GPG-encrypted env files | [docs/gpg-passwd.md](docs/gpg-passwd.md) |
+| `gpg-passwd.sh` | `decrypt_env_file` helper for GPG-encrypted env files | [docs/gpg-passwd.md](docs/gpg-passwd.md) |
 
 These libraries are sourced, not executed. Each library's header comment
 documents its public function surface.
