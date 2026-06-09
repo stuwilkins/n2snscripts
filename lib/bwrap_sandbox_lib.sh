@@ -924,7 +924,7 @@ build_git_mounts() {
     if [[ -f "${_HOME}/.gitconfig" ]]; then
         local _gitconfig_real
         _gitconfig_real="$(readlink -f "${_HOME}/.gitconfig")"
-        _check_path_safe "${_gitconfig_real}" "~/.gitconfig (resolved)"
+        _check_path_safe "${_gitconfig_real}" "\$HOME/.gitconfig (resolved)"
         BWRAP_ARGS+=(--ro-bind "${_gitconfig_real}" "${_HOME}/.gitconfig")
     fi
     if [[ -d "${XDG_CONFIG_HOME}/git" ]]; then
