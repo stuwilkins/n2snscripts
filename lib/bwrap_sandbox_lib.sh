@@ -9,16 +9,18 @@
 #   - Shell detection
 #   - All shared bwrap mounts: base system, binary masking, /etc, home tmpfs,
 #     working directory, git config, pixi, ccache, npm, user bin, NSLS-II,
-#     dynamic tool mounts
+#     dynamic tool mounts, user-supplied extra paths (--ro-path / --rw-path)
 #   - Environment variable framework (clean env + passthrough)
 #   - Launch logic (dry-run printing and bwrap exec)
 #
 # Tool-specific wrapper scripts source this file and provide:
-#   - Argument parsing (parse_wrapper_args)
+#   - Argument parsing (parse_wrapper_args) — must handle --ro-path/--rw-path
+#     and accumulate values into the shared EXTRA_RO_PATHS/EXTRA_RW_PATHS arrays
 #   - Binary resolution (resolve_tool_binary) setting _TOOL_BIN and _TOOL_CMD
 #   - Help text (show_help)
 #   - Tool-specific path resolution, host directory creation, mounts, and env vars
-#   - main() orchestrating the build sequence
+#   - main() orchestrating the build sequence — must call build_extra_path_mounts
+#     after build_dynamic_tool_mounts
 #
 # Usage (in tool wrapper scripts):
 #   SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
@@ -48,6 +50,14 @@ SHOW_HELP=0
 TOOL_ARGS=()
 # shellcheck disable=SC2034  # set by tool wrappers when --new-session is requested
 FORCE_NEW_SESSION=0
+
+# Extra user-supplied paths to mount into the sandbox.
+# Populated by tool-specific parse_wrapper_args via --ro-path / --rw-path.
+# Validated and mounted by build_extra_path_mounts.
+# shellcheck disable=SC2034  # used by tool wrappers that source this library
+EXTRA_RO_PATHS=()
+# shellcheck disable=SC2034  # used by tool wrappers that source this library
+EXTRA_RW_PATHS=()
 
 # Tool binary (set by tool-specific resolve_tool_binary)
 _TOOL_BIN=""
@@ -159,6 +169,9 @@ detect_shell() {
 #   actually emitted, DIR is added to _MOUNTED_PREFIXES so future calls
 #   with the same path or a sub-path are no-ops.
 #   Handles intermediate --dir entries for paths under $HOME.
+#   Calls _check_path_safe before emitting any mount — aborts if DIR
+#   resolves into a blocked path (e.g. a tool binary that symlinks into
+#   ~/.ssh or a misconfigured npm prefix pointing at $HOME).
 _mount_ro_dir_if_needed() {
     local dir="$1"
     [[ -d "${dir}" ]] || return 0
@@ -172,6 +185,11 @@ _mount_ro_dir_if_needed() {
         check="${check%/*}"
         [[ -z "${check}" ]] && check="/"
     done
+
+    # Safety check before emitting the mount.  DIR is already a real
+    # directory path (callers pass dirname() of a resolved binary or a
+    # known path), so no additional readlink -f is needed.
+    _check_path_safe "${dir}" "dynamic mount"
 
     # Create intermediate --dir entries for paths under $HOME (the
     # tmpfs $HOME has no subdirectories yet).
@@ -228,6 +246,10 @@ resolve_and_mount_tool() {
 # _mount_npm_global_prefix [PREFIX]
 #   Mount the entire npm global prefix tree read-only and add its bin/
 #   subdirectory to _EXTRA_PATH_DIRS.  PREFIX defaults to `npm prefix -g`.
+#   Aborts if the resolved prefix is a blocked path — e.g. when npm has
+#   been misconfigured with `npm config set prefix ~` (a common mistake
+#   documented in npm's own install guide), which would expose the entire
+#   home directory read-only inside the sandbox.
 _mount_npm_global_prefix() {
     local npm_prefix="${1:-}"
     if [[ -z "${npm_prefix}" ]]; then
@@ -235,8 +257,14 @@ _mount_npm_global_prefix() {
     fi
     [[ -n "${npm_prefix}" ]] && [[ -d "${npm_prefix}" ]] || return 0
 
-    _mount_ro_dir_if_needed "${npm_prefix}"
-    _EXTRA_PATH_DIRS+=("${npm_prefix}/bin")
+    # Canonicalise before the safety check so symlinks in the prefix path
+    # are resolved (npm itself may return a non-canonical path on some systems).
+    local npm_prefix_canon
+    npm_prefix_canon="$(readlink -f "${npm_prefix}" 2> /dev/null || echo "${npm_prefix}")"
+    _check_path_safe "${npm_prefix_canon}" "npm global prefix"
+
+    _mount_ro_dir_if_needed "${npm_prefix_canon}"
+    _EXTRA_PATH_DIRS+=("${npm_prefix_canon}/bin")
 }
 
 # ── Git include parser ───────────────────────────────────────────
@@ -304,6 +332,260 @@ pass_through_if_set() {
     fi
 }
 
+# ── Path safety validation ───────────────────────────────────────
+
+# _is_prefix_of A B
+#   Returns 0 (true) if B == A or B starts with A/ (A is a parent of B).
+#   Special-cases A="/" because the pattern "${A}/"* would become "//*"
+#   which never matches any real path.
+_is_prefix_of() {
+    local a="$1" b="$2"
+    if [[ "${a}" == "/" ]]; then
+        # Every absolute path is under /.
+        return 0
+    fi
+    [[ "${b}" == "${a}" ]] || [[ "${b}" == "${a}/"* ]]
+}
+
+# _check_path_safe CANON CONTEXT
+#   Assert that the already-resolved canonical path CANON is safe to mount
+#   into the sandbox.  Exits 1 with a descriptive error if it is not.
+#
+#   CANON   : absolute, symlink-free path (output of readlink -f).
+#   CONTEXT : short label used in error messages, e.g. "--ro-path",
+#             "--rw-path", or "working directory".
+#
+#   Must be called AFTER resolve_common_paths so that XDG_DATA_HOME is set.
+#   All build_* and validate_* functions satisfy this — they are called from
+#   main() after resolve_common_paths.
+#
+#   Blocked conditions (all checked against the canonical path):
+#     - CANON is $HOME or an ancestor of $HOME (/, /home, etc.) — would
+#       expose the entire home tree inside the sandbox.
+#     - CANON is inside any of the following sensitive subtrees:
+#
+#       SSH / GPG / cloud keys
+#         ~/.ssh/          private keys and known_hosts
+#         ~/.gnupg/        GPG private keys and keyrings
+#         ~/.aws/          AWS credentials and config
+#         ~/.kube/         Kubernetes cluster credentials (tokens, certs)
+#         ~/.docker/       Docker registry auth (config.json with tokens)
+#
+#       Package-manager credentials
+#         ~/.netrc         cleartext credentials for pip/git/curl/wget
+#                          (used by pip, uv, curl, git-credential-netrc)
+#         ~/.pypirc        twine/flit PyPI upload tokens and passwords
+#         ~/.rattler/      pixi/rattler conda channel auth tokens
+#                          (default path: ~/.rattler/credentials.json;
+#                           can be overridden with RATTLER_AUTH_FILE)
+#         ~/.yarnrc        yarn classic (v1) registry auth tokens
+#         ~/.yarnrc.yml    yarn berry (v2+) per-user registry auth tokens
+#         ~/.yarn/         yarn berry global config directory
+#         $XDG_DATA_HOME/uv/credentials
+#                          uv per-index auth tokens (`uv auth login`);
+#                          default path ~/.local/share/uv/credentials
+#                          (confirmed via `uv auth dir`)
+#
+#       GitHub CLI
+#         ~/.config/gh/    GitHub CLI auth tokens (hosts.yml, etc.)
+#                          Note: bwcopilot intentionally mounts hosts.yml
+#                          from this directory via build_gh_auth_mount,
+#                          which bypasses this check by design — the block
+#                          prevents USER-supplied paths (--ro-path) from
+#                          reaching gh credentials in other wrappers.
+#
+#       System
+#         /root            root's home directory
+#         /etc/shadow      system password hashes
+#         /etc/sudoers     sudo policy
+#         /etc/sudoers.d/  sudo policy fragments
+#
+#   Does NOT check existence — the caller is responsible for that.
+_check_path_safe() {
+    local canon="$1"
+    local context="$2"
+
+    # ── Ancestor-of-home check ───────────────────────────────────
+    # Reject if canon IS $HOME or is a directory that contains $HOME
+    # (i.e. /, /home, the username's parent dir, etc.).
+    # "_is_prefix_of canon _HOME" means: canon is a prefix of _HOME.
+    if _is_prefix_of "${canon}" "${_HOME}"; then
+        echo "Error: ${context} '${canon}' is \$HOME or an ancestor of \$HOME." >&2
+        echo "       Refusing to mount — this would expose the entire home tree." >&2
+        exit 1
+    fi
+
+    # ── Sensitive-subtree checks ─────────────────────────────────
+    # XDG_DATA_HOME is set by resolve_common_paths, which is always called
+    # before any function that invokes _check_path_safe.
+    local _blocked_prefix
+    local _BLOCKED_PREFIXES=(
+        # SSH / GPG / cloud keys
+        "${_HOME}/.ssh"
+        "${_HOME}/.gnupg"
+        "${_HOME}/.aws"
+        "${_HOME}/.kube"
+        "${_HOME}/.docker"
+        # Package-manager credentials
+        "${_HOME}/.netrc"
+        "${_HOME}/.pypirc"
+        "${_HOME}/.rattler"
+        "${_HOME}/.yarnrc"
+        "${_HOME}/.yarnrc.yml"
+        "${_HOME}/.yarn"
+        "${XDG_DATA_HOME}/uv/credentials"
+        # GitHub CLI tokens
+        "${_HOME}/.config/gh"
+        # System
+        "/root"
+        "/etc/shadow"
+        "/etc/sudoers"
+        "/etc/sudoers.d"
+    )
+    for _blocked_prefix in "${_BLOCKED_PREFIXES[@]}"; do
+        if _is_prefix_of "${_blocked_prefix}" "${canon}"; then
+            echo "Error: ${context} '${canon}' is inside the blocked path '${_blocked_prefix}'." >&2
+            echo "       Refusing to mount." >&2
+            exit 1
+        fi
+    done
+}
+
+# _check_dir_safe PATH CONTEXT
+#   Convenience wrapper around _check_path_safe for directory paths that may
+#   or may not exist yet (e.g. tool-home dirs created later by ensure_host_dirs).
+#
+#   If PATH exists on the host, it is canonicalized via readlink -f first so
+#   that symlinks in the path are resolved before the safety check.  If it does
+#   not yet exist, the raw value is checked as-is; this still catches obviously
+#   dangerous literals like $HOME, /root, or ~/.ssh even before the directory
+#   is created.
+#
+#   PATH    : absolute path to check.
+#   CONTEXT : short label for error messages (e.g. "PIXI_HOME", "CLAUDE_HOME").
+_check_dir_safe() {
+    local path="$1"
+    local context="$2"
+    local canon
+    if [[ -e "${path}" ]]; then
+        canon="$(readlink -f "${path}" 2> /dev/null || echo "${path}")"
+    else
+        canon="${path}"
+    fi
+    _check_path_safe "${canon}" "${context}"
+}
+
+# validate_extra_path RAW_PATH MODE
+#   Validate a user-supplied path (from --ro-path or --rw-path) before
+#   mounting it into the sandbox.
+#
+#   RAW_PATH : path string supplied by the user; may contain a leading ~/
+#              or be relative — resolved via tilde expansion + readlink -f.
+#   MODE     : "ro" or "rw" — used only in error messages.
+#
+#   On success: echoes the canonical resolved path to stdout.
+#   On failure: prints an error to stderr and exits 1.
+#
+#   Steps:
+#     1. Expand leading ~/ then resolve to canonical path via readlink -f.
+#     2. Verify the path exists on the host.
+#     3. Delegate safety checks to _check_path_safe.
+validate_extra_path() {
+    local raw_path="$1"
+    local mode="$2"
+
+    # Expand a leading ~/ to $HOME (readlink -f won't do this for us).
+    local expanded_path="${raw_path/#\~/${_HOME}}"
+
+    # Resolve to canonical path (follows symlinks, removes . and ..).
+    local canon
+    canon="$(readlink -f "${expanded_path}" 2> /dev/null || true)"
+
+    # ── Existence check ──────────────────────────────────────────
+    if [[ -z "${canon}" ]] || ! [[ -e "${canon}" ]]; then
+        echo "Error: --${mode}-path '${raw_path}': path does not exist." >&2
+        exit 1
+    fi
+
+    # ── Safety check ─────────────────────────────────────────────
+    _check_path_safe "${canon}" "--${mode}-path"
+
+    # All checks passed — return the canonical path.
+    echo "${canon}"
+}
+
+# ── Extra user path mounts ───────────────────────────────────────
+
+# build_extra_path_mounts
+#   Mount all paths accumulated in EXTRA_RO_PATHS and EXTRA_RW_PATHS.
+#   Each path is validated by validate_extra_path before mounting.
+#
+#   Read-only paths: use _mount_ro_dir_if_needed for directories
+#     (deduplication via _MOUNTED_PREFIXES); for files, emit --ro-bind
+#     directly (no dedup needed — an individual file bind never subsumes
+#     a directory tree).
+#
+#   Read-write paths: emit --bind directly for both files and directories.
+#     For paths under $HOME, intermediate --dir entries are created first
+#     so the bind mount point exists in the tmpfs.
+#
+#   Must be called AFTER build_dynamic_tool_mounts (which pre-populates
+#   _MOUNTED_PREFIXES) and AFTER build_home_tmpfs (which creates the
+#   $HOME tmpfs that intermediate --dir entries populate).
+build_extra_path_mounts() {
+    local _raw_path _canon
+
+    # ── Read-only extra paths ────────────────────────────────────
+    for _raw_path in "${EXTRA_RO_PATHS[@]+"${EXTRA_RO_PATHS[@]}"}"; do
+        _canon="$(validate_extra_path "${_raw_path}" "ro")"
+
+        if [[ -d "${_canon}" ]]; then
+            # Directories: go through the dedup helper.
+            _mount_ro_dir_if_needed "${_canon}"
+        else
+            # Files: --ro-bind directly.  Create intermediate --dir entries
+            # if the file lives under $HOME (the tmpfs has no subdirs yet).
+            if [[ "${_canon}" == "${_HOME}"/* ]]; then
+                local _file_parent="${_canon%/*}"
+                local _rel="${_file_parent#"${_HOME}"/}"
+                local _accum="${_HOME}"
+                local _parts _i
+                IFS='/' read -ra _parts <<< "${_rel}"
+                for ((_i = 0; _i < ${#_parts[@]}; _i++)); do
+                    _accum="${_accum}/${_parts[$_i]}"
+                    BWRAP_ARGS+=(--dir "${_accum}")
+                done
+            fi
+            BWRAP_ARGS+=(--ro-bind "${_canon}" "${_canon}")
+        fi
+    done
+
+    # ── Read-write extra paths ───────────────────────────────────
+    for _raw_path in "${EXTRA_RW_PATHS[@]+"${EXTRA_RW_PATHS[@]}"}"; do
+        _canon="$(validate_extra_path "${_raw_path}" "rw")"
+
+        # Create intermediate --dir entries if the path is under $HOME.
+        if [[ "${_canon}" == "${_HOME}"/* ]]; then
+            local _rel _target
+            if [[ -d "${_canon}" ]]; then
+                _target="${_canon}"
+            else
+                _target="${_canon%/*}"
+            fi
+            _rel="${_target#"${_HOME}"/}"
+            local _accum="${_HOME}"
+            local _parts _i
+            IFS='/' read -ra _parts <<< "${_rel}"
+            for ((_i = 0; _i < ${#_parts[@]}; _i++)); do
+                _accum="${_accum}/${_parts[$_i]}"
+                BWRAP_ARGS+=(--dir "${_accum}")
+            done
+        fi
+
+        BWRAP_ARGS+=(--bind "${_canon}" "${_canon}")
+    done
+}
+
 # ── Path resolution ──────────────────────────────────────────────
 
 resolve_common_paths() {
@@ -337,6 +619,21 @@ resolve_common_paths() {
 
     # npm paths
     NPM_CACHE_DIR="${NPM_CONFIG_CACHE:-${_HOME}/.npm}"
+
+    # ── Safety checks on all user-controllable path roots ────────
+    # These variables are set from env vars (XDG_*, PIXI_HOME, CCACHE_DIR,
+    # NPM_CONFIG_CACHE) and control where entire directory trees are mounted
+    # into the sandbox.  Validate each root once here so that every mount
+    # derived from it is implicitly covered — no per-mount check needed for
+    # sub-paths.  Paths that do not yet exist are checked against the blocked
+    # list anyway (catches e.g. PIXI_HOME=~/.ssh before .pixi is created).
+    _check_dir_safe "${XDG_CONFIG_HOME}"  "XDG_CONFIG_HOME"
+    _check_dir_safe "${XDG_DATA_HOME}"    "XDG_DATA_HOME"
+    _check_dir_safe "${XDG_CACHE_HOME}"   "XDG_CACHE_HOME"
+    _check_dir_safe "${PIXI_HOME_DIR}"    "PIXI_HOME"
+    _check_dir_safe "${CCACHE_CACHE_DIR}" "CCACHE_DIR (cache)"
+    _check_dir_safe "${CCACHE_CONFIG_DIR}" "CCACHE_DIR (config)"
+    _check_dir_safe "${NPM_CACHE_DIR}"    "NPM_CONFIG_CACHE"
 }
 
 # ── Sandbox PATH construction ────────────────────────────────────
@@ -463,7 +760,7 @@ build_binary_masks() {
         # SSH
         ssh scp sftp ssh-agent ssh-add ssh-keygen ssh-keyscan
         # Network
-        telnet nc ncat netcat socat rsync rsh rlogin rexec
+        telnet nc ncat netcat rsync rsh rlogin rexec
         # Kerberos
         kinit klist kdestroy kswitch
         # Keyring
@@ -592,16 +889,12 @@ build_workdir_mount() {
         _BIND_DIR="${_GIT_ROOT}"
     fi
 
-    # Guard: if the resolved bind directory IS the home directory, the
-    # --bind would mount the real host $HOME over the protective tmpfs,
-    # exposing the entire home tree read-write inside the sandbox.
-    if [[ "${_BIND_DIR}" == "${_HOME}" ]]; then
-        echo "Error: refusing to run from your home directory (${_HOME})." >&2
-        echo "The sandbox bind-mounts the working directory read-write and" >&2
-        echo "cannot safely do so for the entire home directory." >&2
-        echo "Please cd into a project directory (ideally a git repo) first." >&2
-        exit 1
-    fi
+    # Guard: reject dangerous working / git-root directories via the same
+    # rules applied to --ro-path / --rw-path.  This catches $HOME itself,
+    # ancestors of $HOME (/home, /), /root, ~/.ssh, and all other blocked
+    # prefixes.  _BIND_DIR comes from git rev-parse or $PWD — both are
+    # already canonical paths, so no readlink -f step is needed here.
+    _check_path_safe "${_BIND_DIR}" "working directory"
 
     # If the bind dir is under HOME, create intermediate directories
     # in the tmpfs so the bind mount point is reachable.
@@ -625,18 +918,29 @@ build_workdir_mount() {
 
 # ── Git config (read-only) ──────────────────────────────────────
 build_git_mounts() {
-    # Resolve symlinks so we bind the real file (readlink -f is a no-op on regular files).
+    # Resolve symlinks so we bind the real file (readlink -f is a no-op on
+    # regular files).  Check the resolved target before emitting the bind:
+    # ~/.gitconfig could be a symlink pointing anywhere on the filesystem.
     if [[ -f "${_HOME}/.gitconfig" ]]; then
-        BWRAP_ARGS+=(--ro-bind "$(readlink -f "${_HOME}/.gitconfig")" "${_HOME}/.gitconfig")
+        local _gitconfig_real
+        _gitconfig_real="$(readlink -f "${_HOME}/.gitconfig")"
+        _check_path_safe "${_gitconfig_real}" "\$HOME/.gitconfig (resolved)"
+        BWRAP_ARGS+=(--ro-bind "${_gitconfig_real}" "${_HOME}/.gitconfig")
     fi
     if [[ -d "${XDG_CONFIG_HOME}/git" ]]; then
+        # XDG_CONFIG_HOME is already validated by resolve_common_paths;
+        # no additional check needed here.
         BWRAP_ARGS+=(--ro-bind "${XDG_CONFIG_HOME}/git" "${XDG_CONFIG_HOME}/git")
     fi
 
-    # Git include files (read-only)
+    # Git include files (read-only).
+    # parse_git_includes already resolved symlinks in include paths via
+    # readlink -f.  Check each resolved include path before mounting —
+    # a git config could contain  path = ~/.ssh/id_rsa  or similar.
     declare -A _GIT_INC_DIRS_SEEN=()
     local inc_path local_parent
     for inc_path in "${GIT_INCLUDE_PATHS[@]+"${GIT_INCLUDE_PATHS[@]}"}"; do
+        _check_path_safe "${inc_path}" "git include path"
         # Ensure parent directory exists as a mount point (deduplicated)
         local_parent="${inc_path%/*}"
         if [[ -z "${_GIT_INC_DIRS_SEEN["${local_parent}"]:-}" ]]; then

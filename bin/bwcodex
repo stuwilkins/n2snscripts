@@ -76,10 +76,22 @@
 #                   BNL ITD ChatGPT subscription auth path; has no effect for
 #                   Hermes-routed setups.  On shared accounts, do NOT use this
 #                   flag — tokens will be ephemeral by default.
+#   --persist-config Bind ~/.codex/config.toml read-write into the sandbox so
+#                   writes persist across sessions.  Default: config.toml is
+#                   copied to a per-session staging file; host file is unchanged.
 #   --debug         Enable verbose Codex logging (sets RUST_LOG=debug).
 #   --new-session   Force bwrap --new-session even on kernels with the TIOCSTI cap
 #                   guard.  Detaches the controlling tty for stricter isolation at the
 #                   cost of SIGWINCH (terminal resize) propagation.
+#   --ro-path PATH  Mount PATH read-only into the sandbox.  May be repeated to
+#                   accumulate multiple paths.  Dangerous paths are blocked:
+#                   $HOME and ancestors, ~/.ssh, ~/.gnupg, ~/.aws, ~/.kube,
+#                   ~/.docker, ~/.netrc, ~/.pypirc, ~/.rattler, ~/.yarnrc,
+#                   ~/.yarnrc.yml, ~/.yarn, ~/.config/gh,
+#                   $XDG_DATA_HOME/uv/credentials, /root, /etc/shadow,
+#                   /etc/sudoers{,.d}.
+#   --rw-path PATH  Mount PATH read-write into the sandbox.  May be repeated to
+#                   accumulate multiple paths.  Same blocked-path rules as --ro-path.
 
 set -euo pipefail
 
@@ -136,6 +148,22 @@ parse_wrapper_args() {
                 FORCE_NEW_SESSION=1
                 shift
                 ;;
+            --ro-path)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: --ro-path requires a path argument." >&2
+                    exit 1
+                fi
+                EXTRA_RO_PATHS+=("$2")
+                shift 2
+                ;;
+            --rw-path)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: --rw-path requires a path argument." >&2
+                    exit 1
+                fi
+                EXTRA_RW_PATHS+=("$2")
+                shift 2
+                ;;
             *)
                 break
                 ;;
@@ -175,9 +203,9 @@ Wrapper options (consumed before codex sees the command line):
                   the same filesystem isolation and environment as codex itself.
                   Example: bwcodex --exec bash
                            bwcodex --exec 'env | sort'
-  --init-auth     Create ~/.codex/auth.json on the host so ChatGPT-login OAuth
-                  tokens persist across sessions.  Only meaningful for the BNL
-                  ITD ChatGPT subscription auth path; has no effect for
+  --init-auth     Create ~/.codex/auth.json on the host so that ChatGPT-login
+                  OAuth tokens persist across sessions.  Only meaningful for the
+                  BNL ITD ChatGPT subscription auth path; has no effect for
                   Hermes-routed setups.  On shared accounts, do NOT use this
                   flag — tokens will be ephemeral by default.
   --persist-config Bind ~/.codex/config.toml read-write into the sandbox so
@@ -195,12 +223,22 @@ Wrapper options (consumed before codex sees the command line):
                   (< 5.14); on newer kernels we omit it so that SIGWINCH (terminal
                   resize) propagates from tmux/screen.  Use this flag to opt back
                   into stricter terminal isolation when SIGWINCH is not important.
+  --ro-path PATH  Mount PATH (file or directory) read-only into the sandbox.
+                  May be repeated to accumulate multiple extra paths.
+                  Blocked: $HOME and ancestors, ~/.ssh, ~/.gnupg, ~/.aws,
+                  ~/.kube, ~/.docker, ~/.netrc, ~/.pypirc, ~/.rattler,
+                  ~/.yarnrc, ~/.yarnrc.yml, ~/.yarn, ~/.config/gh,
+                  $XDG_DATA_HOME/uv/credentials, /root, /etc/shadow,
+                  /etc/sudoers{,.d}.
+                  Symlinks are resolved before the safety check is applied.
+  --rw-path PATH  Mount PATH (file or directory) read-write into the sandbox.
+                  Same blocked-path rules as --ro-path.  May be repeated.
 
 All other arguments are passed through to codex unchanged.
 
 Authentication:
   Two paths are supported:
-    - Hermes (AIFAPIM):  set AIFAPIM_API_KEY (e.g. via `load-dotenv`) and
+    - Hermes (AIFAPIM):  set AIFAPIM_API_KEY (e.g. via `load_dotenv`) and
                          keep OPENAI_API_KEY=dummy.  See ~/.codex/config.toml
                          for the [model_providers.nsls2-hermes] block.
     - ChatGPT login:     run `bwcodex --init-auth` once, then `bwcodex` and
@@ -225,6 +263,10 @@ resolve_codex_paths() {
     CODEX_SKILLS_DIR="${CODEX_HOME_DIR}/skills"
     CODEX_HISTORY_FILE="${CODEX_HOME_DIR}/history.jsonl"
     CODEX_PACKAGES_DIR="${CODEX_HOME_DIR}/packages"
+
+    # Validate the user-controllable root directory once here so that all
+    # sub-path mounts derived from it are implicitly covered.
+    _check_dir_safe "${CODEX_HOME_DIR}" "CODEX_HOME"
 }
 
 # Ensure writable directories and files exist on host.
@@ -436,6 +478,7 @@ main() {
     build_nsls2_mount
     build_codex_bin_mount
     build_dynamic_tool_mounts
+    build_extra_path_mounts
 
     # Environment variables
     build_env_vars

@@ -25,8 +25,9 @@ implement.
 | `bwclaude` | Run the Claude CLI inside a bubblewrap sandbox |
 | `bwcopilot` | Run the GitHub Copilot CLI inside a bubblewrap sandbox |
 | `bwopencode` | Run OpenCode inside a bubblewrap sandbox |
+| `bwcodex` | Run Codex inside a bubblewrap sandbox |
 
-All three wrappers share `lib/bwrap_sandbox_lib.sh` for sandbox construction.
+All four wrappers share `lib/bwrap_sandbox_lib.sh` for sandbox construction.
 See each script's `--help` for tool-specific options.
 
 ### `lib/`
@@ -64,6 +65,13 @@ export PATH="${N2SNSCRIPTS_BIN}:${PATH}"
 
 Add those three exports to your `~/.bashrc` or `~/.zshrc` for persistence.
 
+Alternately, if `~/.local/bin` is already in your path
+
+```bash
+stow -t ~/.local -S n2snscripts --ignore='etc' --ignore=README.md
+```
+
+
 ## Requirements
 
 - `bash` >= 4.x (the `bw*` wrappers use `[[ ]]` and arrays)
@@ -80,6 +88,7 @@ Add those three exports to your `~/.bashrc` or `~/.zshrc` for persistence.
 bwopencode [bwopencode-options] [opencode arguments...]
 bwclaude   [bwclaude-options]   [claude arguments...]
 bwcopilot  [bwcopilot-options]  [copilot arguments...]
+bwcodex    [bwcodex-options]    [codex arguments...]
 ```
 
 Common wrapper options:
