@@ -76,6 +76,9 @@
 #                   BNL ITD ChatGPT subscription auth path; has no effect for
 #                   Hermes-routed setups.  On shared accounts, do NOT use this
 #                   flag — tokens will be ephemeral by default.
+#   --persist-config Bind ~/.codex/config.toml read-write into the sandbox so
+#                   writes persist across sessions.  Default: config.toml is
+#                   copied to a per-session staging file; host file is unchanged.
 #   --debug         Enable verbose Codex logging (sets RUST_LOG=debug).
 #   --new-session   Force bwrap --new-session even on kernels with the TIOCSTI cap
 #                   guard.  Detaches the controlling tty for stricter isolation at the
@@ -200,9 +203,9 @@ Wrapper options (consumed before codex sees the command line):
                   the same filesystem isolation and environment as codex itself.
                   Example: bwcodex --exec bash
                            bwcodex --exec 'env | sort'
-  --init-auth     Create ~/.codex/auth.json on the host so ChatGPT-login OAuth
-                  tokens persist across sessions.  Only meaningful for the BNL
-                  ITD ChatGPT subscription auth path; has no effect for
+  --init-auth     Create ~/.codex/auth.json on the host so that ChatGPT-login
+                  OAuth tokens persist across sessions.  Only meaningful for the
+                  BNL ITD ChatGPT subscription auth path; has no effect for
                   Hermes-routed setups.  On shared accounts, do NOT use this
                   flag — tokens will be ephemeral by default.
   --persist-config Bind ~/.codex/config.toml read-write into the sandbox so
@@ -235,7 +238,7 @@ All other arguments are passed through to codex unchanged.
 
 Authentication:
   Two paths are supported:
-    - Hermes (AIFAPIM):  set AIFAPIM_API_KEY (e.g. via `load-dotenv`) and
+    - Hermes (AIFAPIM):  set AIFAPIM_API_KEY (e.g. via `load_dotenv`) and
                          keep OPENAI_API_KEY=dummy.  See ~/.codex/config.toml
                          for the [model_providers.nsls2-hermes] block.
     - ChatGPT login:     run `bwcodex --init-auth` once, then `bwcodex` and

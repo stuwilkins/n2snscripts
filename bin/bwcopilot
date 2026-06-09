@@ -50,7 +50,7 @@
 #   --exec CMD      Run CMD inside the sandbox instead of copilot.
 #                   Useful for running one-off commands, scripts, or diagnostic tools
 #                   inside the fully-configured sandbox environment.
-#   --init-auth     Persist auth tokens to host (for first-time setup on personal machines).
+#   --init-auth     Persist auth tokens to host (run once on personal machines).
 #   --new-session   Force bwrap --new-session even on kernels with the TIOCSTI cap
 #                   guard.  Detaches the controlling tty for stricter isolation at the
 #                   cost of SIGWINCH (terminal resize) propagation.

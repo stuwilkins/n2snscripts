@@ -155,15 +155,15 @@ bwopencode — opencode inside a bubblewrap sandbox
 
 Wrapper options (consumed before opencode sees the command line):
   -h, --help      Show this message followed by opencode's own help.
-  --init-auth     Create auth.json on the host so GitHub OAuth tokens persist
-                  across sessions.  Run once on a personal account; skip on
-                  shared accounts (tokens will be ephemeral by default).
   --dry-run       Print the bwrap command that would be run, then exit.
   --exec CMD      Run CMD inside the fully-configured sandbox instead of opencode.
                   Use this to run scripts, diagnostic tools, or any command with
                   the same filesystem isolation and environment as opencode itself.
                   Example: bwopencode --exec bash
                            bwopencode --exec 'env | sort'
+  --init-auth     Create auth.json on the host so GitHub OAuth tokens persist
+                  across sessions.  Run once on a personal account; skip on
+                  shared accounts (tokens will be ephemeral by default).
   --new-session   Force bwrap to call setsid(2), detaching the sandbox from the
                   controlling terminal.  This is the default on older kernels
                   (< 5.14); on newer kernels we omit it so that SIGWINCH (terminal

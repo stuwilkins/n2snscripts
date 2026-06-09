@@ -51,8 +51,12 @@
 #   --exec CMD      Run CMD inside the sandbox instead of claude.
 #                   Useful for running one-off commands, scripts, or diagnostic tools
 #                   inside the fully-configured sandbox environment.
-#   --init-auth     Persist credentials to host (for first-time setup on personal machines).
+#   --init-auth     Persist auth credentials to host (run once on personal machines).
 #   --debug         Enable verbose debug logging (ANTHROPIC_LOG=debug, NODE_DEBUG, --debug --verbose).
+#                   NOTE: shadows claude's own -d/--debug [filter] flag.  To pass a debug
+#                   filter to claude directly, place it after a non-wrapper argument so
+#                   the wrapper's argument parser has already stopped (e.g.
+#                   bwclaude --print --debug api,hooks).
 #   --new-session   Force bwrap --new-session even on kernels with the TIOCSTI cap
 #                   guard.  Detaches the controlling tty for stricter isolation at the
 #                   cost of SIGWINCH (terminal resize) propagation.
@@ -174,6 +178,10 @@ Wrapper options (consumed before claude sees the command line):
   --init-auth     Persist auth credentials to host (run once on personal machines).
   --debug         Enable verbose debug logging (sets ANTHROPIC_LOG=debug,
                   NODE_DEBUG=http,https,tls, and passes --debug --verbose to claude).
+                  NOTE: shadows claude's own -d/--debug [filter] flag.  To pass
+                  a debug filter directly to claude, place it after a non-wrapper
+                  argument so the wrapper stops parsing first (e.g.
+                  bwclaude --print --debug api,hooks).
   --new-session   Force bwrap to call setsid(2), detaching the sandbox from the
                   controlling terminal.  This is the default on older kernels
                   (< 5.14); on newer kernels we omit it so that SIGWINCH (terminal
