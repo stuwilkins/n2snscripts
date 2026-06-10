@@ -59,9 +59,11 @@ bwclaude [bwclaude-options] [claude arguments...]
 Routes through the NSLS-II Hermes (AIFAPIM) gateway in Azure AI Foundry
 mode. The wrapper forces `CLAUDE_CODE_USE_FOUNDRY=1` and plumbs:
 
-- **`ANTHROPIC_FOUNDRY_BASE_URL`** — defaults to
-  `https://hermes.nsls2.bnl.gov/anthropic`; override by exporting
-  `ANTHROPIC_FOUNDRY_BASE_URL` on the host.
+- **`ANTHROPIC_FOUNDRY_BASE_URL`** — if not set, constructed as
+  `https://${AIFAPIM_HOST}/anthropic`; override by exporting
+  `ANTHROPIC_FOUNDRY_BASE_URL` on the host. If neither
+  `ANTHROPIC_FOUNDRY_BASE_URL` nor `AIFAPIM_HOST` is set, the wrapper
+  refuses to start with a clear error message.
 - **`ANTHROPIC_FOUNDRY_API_KEY`** — taken from the host's
   `ANTHROPIC_FOUNDRY_API_KEY` if set, otherwise from `AIFAPIM_API_KEY`
   (the existing NSLS-II convention). If neither is set, the wrapper
@@ -106,7 +108,7 @@ bwcodex [bwcodex-options] [codex arguments...]
 Two approved auth paths (configured in `~/.codex/config.toml`):
 
 - **Hermes (AIFAPIM) routing** — provider block points at
-  `https://hermes.nsls2.bnl.gov/openai/v1` with `x-api-key` header; the
+  `https://${AIFAPIM_HOST}/openai/v1` with `x-api-key` header; the
   wrapper plumbs `AIFAPIM_HOST` and `AIFAPIM_API_KEY` through.
 - **BNL ITD ChatGPT subscription** — `codex login` OAuth flow persists
   tokens to `~/.codex/auth.json`. Run once with `--init-auth` to make

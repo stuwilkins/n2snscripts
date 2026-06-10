@@ -364,12 +364,18 @@ build_claude_env() {
         BWRAP_ARGS+=(--setenv ANTHROPIC_FOUNDRY_API_KEY "${AIFAPIM_API_KEY}")
     fi
 
-    # Foundry base URL: same hermes gateway path as the legacy Anthropic route.
-    # Honor a host override if the user explicitly sets ANTHROPIC_FOUNDRY_BASE_URL.
-    if [[ -z "${ANTHROPIC_FOUNDRY_BASE_URL:-}" ]]; then
-        BWRAP_ARGS+=(--setenv ANTHROPIC_FOUNDRY_BASE_URL "https://hermes.nsls2.bnl.gov/anthropic")
-    else
+    # Foundry base URL: prefer explicit ANTHROPIC_FOUNDRY_BASE_URL override;
+    # otherwise derive from AIFAPIM_HOST (required).
+    if [[ -n "${ANTHROPIC_FOUNDRY_BASE_URL:-}" ]]; then
         pass_through_if_set ANTHROPIC_FOUNDRY_BASE_URL
+    elif [[ -n "${AIFAPIM_HOST:-}" ]]; then
+        BWRAP_ARGS+=(--setenv ANTHROPIC_FOUNDRY_BASE_URL "https://${AIFAPIM_HOST}/anthropic")
+    else
+        echo "Error: bwclaude requires AIFAPIM_HOST (or ANTHROPIC_FOUNDRY_BASE_URL) to be set." >&2
+        echo "Export one of:" >&2
+        echo "  AIFAPIM_HOST=hermes.nsls2.bnl.gov        # NSLS-II Hermes gateway hostname" >&2
+        echo "  ANTHROPIC_FOUNDRY_BASE_URL=https://...   # full Foundry base URL override" >&2
+        exit 1
     fi
 
     # Forward any host CLAUDE_* env vars (incl. user overrides for verbosity, etc.).
