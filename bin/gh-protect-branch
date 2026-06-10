@@ -142,19 +142,19 @@ RULESET_PAYLOAD=$(printf '{
 # 1) Repository ruleset (all branches via ~ALL) — idempotent.
 #    Check for an existing ruleset with our name; PUT if found, POST if not.
 RULESET_ID=$(gh api "repos/${REPO}/rulesets" \
-    --jq ".[] | select(.name==\"${RULESET_NAME}\") | .id" 2>/dev/null || true)
+    --jq ".[] | select(.name==\"${RULESET_NAME}\") | .id" 2> /dev/null || true)
 
 if [[ -n "${RULESET_ID}" ]]; then
-    printf '%s' "${RULESET_PAYLOAD}" \
-      | gh api -X PUT "repos/${REPO}/rulesets/${RULESET_ID}" \
-          -H "Accept: application/vnd.github+json" \
-          --input - > /dev/null
+    printf '%s' "${RULESET_PAYLOAD}" |
+        gh api -X PUT "repos/${REPO}/rulesets/${RULESET_ID}" \
+            -H "Accept: application/vnd.github+json" \
+            --input - > /dev/null
     RULESET_ACTION="updated"
 else
-    printf '%s' "${RULESET_PAYLOAD}" \
-      | gh api -X POST "repos/${REPO}/rulesets" \
-          -H "Accept: application/vnd.github+json" \
-          --input - > /dev/null
+    printf '%s' "${RULESET_PAYLOAD}" |
+        gh api -X POST "repos/${REPO}/rulesets" \
+            -H "Accept: application/vnd.github+json" \
+            --input - > /dev/null
     RULESET_ACTION="created"
 fi
 
@@ -180,10 +180,10 @@ printf '{
   },
   "restrictions": null,
   "required_conversation_resolution": true
-}' "${DISMISSAL_JSON}" \
-  | gh api -X PUT "repos/${REPO}/branches/${BRANCH}/protection" \
-      -H "Accept: application/vnd.github+json" \
-      --input - > /dev/null
+}' "${DISMISSAL_JSON}" |
+    gh api -X PUT "repos/${REPO}/branches/${BRANCH}/protection" \
+        -H "Accept: application/vnd.github+json" \
+        --input - > /dev/null
 
 # 3) Belt-and-suspenders signed commits on the named branch via classic API.
 #    The Ruleset already requires signed commits on ~ALL branches, but the classic
