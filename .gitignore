@@ -9,3 +9,11 @@ __pycache__/
 # Tool caches
 .ruff_cache/
 .mypy_cache/
+
+# Emacs backups and autosaves
+*~
+\#*\#
+.\#*
+# Vim swap files
+*.swp
+*.swo
