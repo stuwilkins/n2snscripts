@@ -260,18 +260,10 @@ ensure_host_dirs() {
 # This is intentional for shared accounts.  On a personal machine,
 # run with --init-auth once to bootstrap persistent credentials.
 build_claude_home_mount() {
-    # Create intermediate --dir entries if CLAUDE_HOME_DIR is nested under $HOME.
-    if [[ "${CLAUDE_HOME_DIR}" == "${_HOME}"/* ]]; then
-        local _rel="${CLAUDE_HOME_DIR#"${_HOME}"/}"
-        local _accum="${_HOME}"
-        local _parts
-        IFS='/' read -ra _parts <<< "${_rel}"
-        local _i
-        for ((_i = 0; _i < ${#_parts[@]} - 1; _i++)); do
-            _accum="${_accum}/${_parts[$_i]}"
-            BWRAP_ARGS+=(--dir "${_accum}")
-        done
-    fi
+    # Create intermediate --dir entries if CLAUDE_HOME_DIR is nested under
+    # $HOME.  CLAUDE_HOME_DIR is the tmpfs mount point, so only its ancestors
+    # are pre-created.
+    _emit_home_intermediate_dirs "${CLAUDE_HOME_DIR}"
 
     BWRAP_ARGS+=(--tmpfs "${CLAUDE_HOME_DIR}")
 
@@ -339,6 +331,10 @@ build_claude_cache_mount() {
 
 # ── Claude env vars ──────────────────────────────────────────────
 build_claude_env() {
+    # NOTE: bwclaude is hard-wired for the NSLS-II AIFAPIM/foundry gateway.
+    # It cannot be used on a personal machine without modifying the foundry
+    # URL/key logic below to point at a different foundry instance.
+
     # Foundry mode is forced on (see CLAUDE_CODE_USE_FOUNDRY below).
     # In foundry mode, Claude Code uses ANTHROPIC_FOUNDRY_* env vars and
     # ignores ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY, so we no longer set
@@ -380,11 +376,11 @@ build_claude_env() {
 
     # Forward any host CLAUDE_* env vars (incl. user overrides for verbosity, etc.).
     local _key
-    for _key in $(compgen -e); do
+    while IFS= read -r _key; do
         if [[ "${_key}" == CLAUDE_* ]]; then
             BWRAP_ARGS+=(--setenv "${_key}" "${!_key}")
         fi
-    done
+    done < <(compgen -e)
 
     # Enforce after the loop so host env cannot override these.
     BWRAP_ARGS+=(--setenv CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS 1)

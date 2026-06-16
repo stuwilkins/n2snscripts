@@ -306,18 +306,10 @@ check_codex_config() {
 # behaviour for shared accounts.  On a personal account using
 # ChatGPT login, run with --init-auth once to bootstrap persistent auth.
 build_codex_home_mount() {
-    # Create intermediate --dir entries if CODEX_HOME_DIR is nested under $HOME.
-    if [[ "${CODEX_HOME_DIR}" == "${_HOME}"/* ]]; then
-        local _rel="${CODEX_HOME_DIR#"${_HOME}"/}"
-        local _accum="${_HOME}"
-        local _parts
-        IFS='/' read -ra _parts <<< "${_rel}"
-        local _i
-        for ((_i = 0; _i < ${#_parts[@]} - 1; _i++)); do
-            _accum="${_accum}/${_parts[$_i]}"
-            BWRAP_ARGS+=(--dir "${_accum}")
-        done
-    fi
+    # Create intermediate --dir entries if CODEX_HOME_DIR is nested under
+    # $HOME.  CODEX_HOME_DIR is the tmpfs mount point, so only its ancestors
+    # are pre-created.
+    _emit_home_intermediate_dirs "${CODEX_HOME_DIR}"
 
     BWRAP_ARGS+=(--tmpfs "${CODEX_HOME_DIR}")
 
@@ -417,11 +409,11 @@ build_codex_env() {
 
     # Generic CODEX_* sweep so user-defined overrides flow through.
     local _key
-    for _key in $(compgen -e); do
+    while IFS= read -r _key; do
         if [[ "${_key}" == CODEX_* ]]; then
             BWRAP_ARGS+=(--setenv "${_key}" "${!_key}")
         fi
-    done
+    done < <(compgen -e)
 
     # --debug wrapper flag: force verbose logging regardless of host env.
     if [[ "${DEBUG_MODE}" -eq 1 ]]; then

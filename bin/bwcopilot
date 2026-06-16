@@ -271,17 +271,9 @@ ensure_host_dirs() {
 #   - command-history-state.json, ide/: transient state
 build_copilot_home_mount() {
     # Create intermediate directories for paths under $HOME in the tmpfs.
-    if [[ "${COPILOT_HOME_DIR}" == "${_HOME}"/* ]]; then
-        local _rel="${COPILOT_HOME_DIR#"${_HOME}"/}"
-        local _accum="${_HOME}"
-        local _parts
-        IFS='/' read -ra _parts <<< "${_rel}"
-        local _i
-        for ((_i = 0; _i < ${#_parts[@]} - 1; _i++)); do
-            _accum="${_accum}/${_parts[$_i]}"
-            BWRAP_ARGS+=(--dir "${_accum}")
-        done
-    fi
+    # COPILOT_HOME_DIR is the tmpfs mount point, so only its ancestors are
+    # pre-created.
+    _emit_home_intermediate_dirs "${COPILOT_HOME_DIR}"
 
     # Mount COPILOT_HOME as tmpfs (ephemeral by default)
     BWRAP_ARGS+=(--tmpfs "${COPILOT_HOME_DIR}")
