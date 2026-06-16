@@ -45,10 +45,15 @@
 
 set -euo pipefail
 
+if (( BASH_VERSINFO[0] < 4 )); then
+    echo "Error: gh-protect-branch requires bash >= 4.0 (found ${BASH_VERSION})." >&2
+    exit 1
+fi
+
 RULESET_NAME="nsls2-branch-protection"
 
 show_help() {
-    sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,/^$/{ s/^# \{0,1\}//; p; }' "$0"
 }
 
 APPROVERS_TEAM=""
@@ -89,7 +94,8 @@ REPO="$1"
 BRANCH="${2:-main}"
 
 if [[ ! "${REPO}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
-    echo "Error: repository must be in 'owner/repo' format (got: ${REPO})" >&2
+    echo "Error: repository must be in 'owner/repo' format (e.g. NSLS2/n2snscripts)." >&2
+    echo "       Got: '${REPO}'" >&2
     exit 1
 fi
 
