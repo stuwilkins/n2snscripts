@@ -22,13 +22,17 @@ implement.
 
 | Script | Purpose |
 | --- | --- |
+| `azoidcapp` | Create an Entra ID OIDC app + SP with MS Graph permissions |
 | `bwclaude` | Run the Claude CLI inside a bubblewrap sandbox |
 | `bwcopilot` | Run the GitHub Copilot CLI inside a bubblewrap sandbox |
 | `bwopencode` | Run OpenCode inside a bubblewrap sandbox |
 | `bwcodex` | Run Codex inside a bubblewrap sandbox |
+| `pemdecompose` | List and verify certificates in a PEM file |
 
-All four wrappers share `lib/bwrap_sandbox_lib.sh` for sandbox construction.
-See each script's `--help` for tool-specific options.
+The four `bw*` wrappers share `lib/bwrap_sandbox_lib.sh` for sandbox
+construction. `azoidcapp` and `pemdecompose` are standalone utilities
+with no sandbox dependency. See each script's `--help` for tool-specific
+options.
 
 ### `lib/`
 
@@ -79,6 +83,9 @@ stow -t ~/.local -S n2snscripts --ignore='etc' --ignore=README.md
   - 0.5.0+ enables `--clearenv`
   - 0.6.3+ enables bind-over-ro-bind binary masking
 - `gpg(1)` for `gpg-passwd.sh`
+- `openssl(1)` for `pemdecompose`
+- `python3 >= 3.9` (stdlib only, no pip dependencies) for `azoidcapp`
+- `az` (Azure CLI) logged in via `az login` for `azoidcapp`
 
 ## Usage
 
@@ -122,3 +129,77 @@ Behaviour:
   fails.
 
 See the library header for the full contract.
+
+### `azoidcapp`
+
+Create or reconcile an Azure Entra ID OIDC web application and its
+service principal. Sets an owner on both objects, ensures Microsoft
+Graph API permissions (`User.Read.All` application app-role plus the
+standard OIDC delegated scopes `offline_access`, `email`, `openid`,
+and `profile`), and grants tenant-wide admin consent.
+
+The script is **idempotent**: re-running with the same `--name` is
+safe. Existing objects are reused; redirect URIs are unioned (never
+removed); permissions and consent are reconciled to the desired state.
+
+Authentication reuses the current `az` CLI session — no additional
+credentials or Python packages are required.
+
+```text
+azoidcapp --name NAME --owner UPN --redirect-uri URI [options]
+```
+
+| Option | Effect |
+| --- | --- |
+| `-n`, `--name NAME` | Display name of the app registration (required) |
+| `-o`, `--owner UPN` | Owner UPN/email resolved to an object ID (required) |
+| `-r`, `--redirect-uri URI` | Web redirect URI; repeatable, minimum one |
+| `-t`, `--tenant TENANT` | Tenant ID or domain for the `az` token request |
+| `--json` | Emit a JSON result instead of a human-readable summary |
+| `-h`, `--help` | Show help and exit |
+
+Example:
+
+```bash
+azoidcapp \
+  --name "My OIDC App" \
+  --owner alice@example.com \
+  --redirect-uri https://app.example.com/callback \
+  --redirect-uri https://app.example.com/silent-callback
+```
+
+Exit codes: `0` success, `1` usage error, `2` `az` missing or not logged
+in, `3` owner UPN not found, `4` a Microsoft Graph call failed.
+
+Requires: `az` (Azure CLI, logged in via `az login`), `python3 >= 3.9`
+(stdlib only — no pip dependencies).
+
+### `pemdecompose`
+
+List certificates in a combined PEM file. Useful for inspecting outputs of
+the `acme_certificates` Ansible role (`server.pem`, `server.combined.pem`,
+`server_chain.pem`).
+
+```bash
+pemdecompose server.combined.pem            # subject, issuer, sigalg per cert
+pemdecompose --verify server.pem            # also check chain order
+pemdecompose server.pem server_chain.pem    # multiple files, with banners
+```
+
+Blank lines and non-PEM text between PEM blocks are tolerated. Private-key
+blocks in a combined file are skipped automatically (only certificate
+blocks are inspected).
+
+`--verify` checks that each cert (except the last in the file) is issued
+by the next cert in the file, using `openssl verify -partial_chain` and a
+DN match between issuer(N) and subject(N+1). Validity dates are not part
+of the structural check, so expired roots do not cause `--verify` to fail.
+
+Output is colourised when stdout is a TTY. Set `NO_COLOR=1` or pass
+`--no-color` to suppress ANSI escapes.
+
+Exit codes: `0` success, `1` usage error, `2` no certificates found in
+some file, `3` openssl parse error, `4` `--verify` failed for at least
+one chain link.
+
+Requires only `openssl`.

@@ -1,0 +1,907 @@
+#!/usr/bin/env python3
+# azoidcapp — Create or reconcile an Entra ID OIDC web application.
+#
+# Registers a new Azure AD application for OIDC authentication, creates
+# the corresponding service principal, sets an owner on both objects,
+# adds Microsoft Graph API permissions (User.Read and the standard OIDC
+# delegated scopes), and grants tenant-wide admin
+# consent for all assigned permissions.
+#
+# The script is idempotent: re-running with the same --name is safe.
+# Existing objects are reused; redirect URIs are unioned (never removed);
+# permissions and consent are reconciled to the desired state.
+#
+# Authentication reuses the current 'az' CLI session; no extra credentials
+# or pip dependencies are required.
+#
+# Requires: az (Azure CLI, logged in via 'az login'), python3 >= 3.9
+#
+# Usage:
+#   azoidcapp --name NAME --owner UPN --redirect-uri URI [options]
+#   azoidcapp --help
+#
+# Required options:
+#   -n, --name NAME           Display name of the app registration
+#   -o, --owner UPN           Owner UPN/email (e.g. user@example.com)
+#   -r, --redirect-uri URI    Web redirect URI (repeatable, at least one)
+#
+# Optional options:
+#   -t, --tenant TENANT       Tenant ID or domain for the az token request
+#       --json                Emit a JSON result instead of human-readable
+#                             summary
+#   -h, --help                Show this help and exit
+#
+# Exit codes:
+#   0  success (all resources in desired state)
+#   1  usage error
+#   2  az CLI missing or not logged in
+#   3  owner UPN could not be resolved to an object ID
+#   4  a Microsoft Graph call failed, or multiple apps share --name
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any
+
+# ---------------------------------------------------------------------------
+# Python version guard
+# ---------------------------------------------------------------------------
+
+if sys.version_info < (3, 9):
+    sys.exit("azoidcapp: requires Python 3.9+")
+
+# ---------------------------------------------------------------------------
+# Well-known Microsoft Graph identifiers
+# These are stable, tenant-independent values published by Microsoft.
+# ---------------------------------------------------------------------------
+
+GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+
+# Microsoft Graph resource application ID (same in every tenant)
+GRAPH_APP_ID = "00000003-0000-0000-c000-000000000000"
+
+# Delegated OAuth2 scope permissions (OIDC claims + User.Read)
+DELEGATED_SCOPES: dict[str, str] = {
+    "openid": "37f7f235-527c-4136-accd-4a02d197296e",
+    "email": "64a6cdd6-aab1-4aaf-94b8-3cc8405e90d0",
+    "profile": "14dad69e-099b-42c9-810b-d002981feec1",
+    "offline_access": "7427e0e9-2fba-42fe-b0c0-848c9e6a8182",
+    "User.Read": "e1fe6dd8-ba31-4d61-89e7-88639da4683d",
+}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+PROG = "azoidcapp"
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"{PROG}: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def warn(msg: str) -> None:
+    print(f"{PROG}: warning: {msg}", file=sys.stderr)
+
+
+def info(msg: str) -> None:
+    print(f"  {msg}", file=sys.stderr)
+
+
+def step(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def _run(args: list[str]) -> str:
+    """Run a subprocess, return stdout. Die with code 2 on failure."""
+    try:
+        result = subprocess.run(
+            args,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+    except FileNotFoundError:
+        die(f"command not found: {args[0]}", code=2)
+    except subprocess.CalledProcessError as exc:
+        die(
+            f"command failed: {' '.join(args)}\n{exc.stderr.strip()}",
+            code=2,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Azure CLI helpers
+# ---------------------------------------------------------------------------
+
+
+def check_az_login() -> None:
+    """Verify that 'az' is on PATH and a session is active."""
+    try:
+        subprocess.run(
+            ["az", "account", "show"],
+            check=True,
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        die(
+            "'az' CLI not found on PATH. "
+            "Install the Azure CLI: https://aka.ms/azure-cli",
+            code=2,
+        )
+    except subprocess.CalledProcessError:
+        die(
+            "No active az session. Run 'az login' first.",
+            code=2,
+        )
+
+
+def get_graph_token(tenant: str | None) -> str:
+    """Obtain a Microsoft Graph bearer token via the az CLI."""
+    cmd = [
+        "az",
+        "account",
+        "get-access-token",
+        "--resource",
+        "https://graph.microsoft.com",
+        "--query",
+        "accessToken",
+        "--output",
+        "tsv",
+    ]
+    if tenant:
+        cmd += ["--tenant", tenant]
+    token = _run(cmd)
+    if not token:
+        die("Failed to obtain a Microsoft Graph access token.", code=2)
+    return token
+
+
+# ---------------------------------------------------------------------------
+# Microsoft Graph REST helpers
+# ---------------------------------------------------------------------------
+
+
+def _filter_path(resource: str, filter_expr: str, select: str | None = None) -> str:
+    """
+    Build a Graph list path with a properly encoded $filter (and $select).
+
+    Encoding the filter value prevents urllib from rejecting URLs that
+    contain spaces or single-quotes (e.g. OData 'eq' expressions).
+    """
+    qs = f"$filter={urllib.parse.quote(filter_expr)}"
+    if select:
+        qs += f"&$select={urllib.parse.quote(select)}"
+    return f"/{resource}?{qs}"
+
+
+def _parse_error(exc: urllib.error.HTTPError) -> tuple[int, str]:
+    """Return (http_code, message_string) from a Graph HTTPError."""
+    try:
+        body_bytes = exc.read()
+    except Exception:
+        body_bytes = b""
+    try:
+        detail = json.loads(body_bytes).get("error", {}).get("message", "")
+    except Exception:
+        detail = body_bytes.decode(errors="replace")
+    return exc.code, detail or f"HTTP {exc.code}"
+
+
+def _graph_request(
+    method: str,
+    path: str,
+    token: str,
+    body: dict[str, Any] | None = None,
+    *,
+    expect_no_content: bool = False,
+) -> dict[str, Any] | None:
+    """
+    Make a single Microsoft Graph REST call.
+
+    Returns the parsed JSON body on success, or None when the server
+    returns 204 No Content (or expect_no_content is True).
+    Raises urllib.error.HTTPError on HTTP failure.
+    """
+    url = f"{GRAPH_BASE}{path}"
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req) as resp:
+        raw = resp.read()
+        if expect_no_content or not raw:
+            return None
+        return json.loads(raw)
+
+
+def graph(
+    method: str,
+    path: str,
+    token: str,
+    body: dict[str, Any] | None = None,
+    *,
+    expect_no_content: bool = False,
+    description: str = "",
+) -> dict[str, Any] | None:
+    """Graph call; dies with code 4 on HTTP failure."""
+    label = description or f"{method} {path}"
+    try:
+        return _graph_request(
+            method, path, token, body, expect_no_content=expect_no_content
+        )
+    except urllib.error.HTTPError as exc:
+        code, detail = _parse_error(exc)
+        die(f"{label} failed ({code}): {detail}", code=4)
+
+
+def _is_already_exists_error(http_code: int, message: str) -> bool:
+    """
+    Return True when Graph is telling us the resource already exists.
+
+    Graph returns 409 for most duplicate-object attempts, but uses 400
+    with specific message text for duplicate owner refs and app-role
+    assignments.
+    """
+    if http_code == 409:
+        return True
+    if http_code == 400:
+        msg_lower = message.lower()
+        return any(
+            phrase in msg_lower
+            for phrase in (
+                # "already exist" (no trailing 's') matches both:
+                #   "One or more added object references already exist
+                #    for the following modified properties: 'owners'."
+                #   "Permission being assigned already exists."
+                "already exist",
+                "object references already exist",
+            )
+        )
+    return False
+
+
+def graph_or_exists(
+    method: str,
+    path: str,
+    token: str,
+    body: dict[str, Any] | None = None,
+    *,
+    expect_no_content: bool = False,
+    description: str = "",
+) -> tuple[dict[str, Any] | None, bool]:
+    """
+    Graph call that treats 'already exists' responses as success.
+
+    Returns (response_body_or_None, already_existed).
+    Dies with code 4 on any other HTTP failure.
+    """
+    label = description or f"{method} {path}"
+    try:
+        resp = _graph_request(
+            method, path, token, body, expect_no_content=expect_no_content
+        )
+        return resp, False
+    except urllib.error.HTTPError as exc:
+        code, detail = _parse_error(exc)
+        if _is_already_exists_error(code, detail):
+            return None, True
+        die(f"{label} failed ({code}): {detail}", code=4)
+
+
+def graph_with_retry(
+    method: str,
+    path: str,
+    token: str,
+    body: dict[str, Any] | None = None,
+    *,
+    expect_no_content: bool = False,
+    description: str = "",
+    retries: int = 6,
+    backoff: float = 10.0,
+    swallow_exists: bool = False,
+) -> tuple[dict[str, Any] | None, bool]:
+    """
+    Graph call with exponential backoff on transient errors, optionally
+    treating 'already exists' as success.
+
+    After creating a service principal, Microsoft Graph can take up to
+    ~60 s to make the new SP visible to all endpoints (admin-consent,
+    role assignment, etc.).  Retrying with a linear backoff handles this.
+
+    Returns (response_body_or_None, already_existed).
+    """
+    label = description or f"{method} {path}"
+    for attempt in range(1, retries + 1):
+        try:
+            resp = _graph_request(
+                method, path, token, body, expect_no_content=expect_no_content
+            )
+            return resp, False
+        except urllib.error.HTTPError as exc:
+            code, detail = _parse_error(exc)
+
+            if swallow_exists and _is_already_exists_error(code, detail):
+                return None, True
+
+            if code in (400, 404, 503) and attempt < retries:
+                wait = backoff * attempt
+                warn(
+                    f"{label}: HTTP {code} (attempt {attempt}/{retries}), "
+                    f"retrying in {wait:.0f}s\u2026"
+                )
+                time.sleep(wait)
+                continue
+
+            die(f"{label} failed ({code}): {detail}", code=4)
+
+    die(f"{label}: all {retries} attempts failed", code=4)
+
+
+def graph_list(
+    resource: str,
+    filter_expr: str,
+    token: str,
+    select: str | None = None,
+    description: str = "",
+) -> list[dict[str, Any]]:
+    """
+    Return all items from a Graph list endpoint matching an OData filter.
+
+    Uses a properly encoded URL to avoid InvalidURL errors on spaces/quotes.
+    """
+    path = _filter_path(resource, filter_expr, select)
+    resp = graph("GET", path, token, description=description or f"list {resource}")
+    return resp.get("value", []) if resp else []  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# Idempotency helpers
+# ---------------------------------------------------------------------------
+
+
+def _desired_resource_access() -> list[dict[str, Any]]:
+    """Build the requiredResourceAccess block for the Graph API permissions."""
+    return [
+        {
+            "resourceAppId": GRAPH_APP_ID,
+            "resourceAccess": [
+                {"id": scope_id, "type": "Scope"}
+                for scope_id in DELEGATED_SCOPES.values()
+            ],
+        }
+    ]
+
+
+def _merge_resource_access(
+    existing: list[dict[str, Any]],
+    desired: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool]:
+    """
+    Union desired resourceAccess entries into existing ones.
+
+    For the Graph API block specifically, ensures all desired Role/Scope
+    entries are present while preserving any other blocks untouched.
+    Returns (merged_list, changed).
+    """
+    # Index existing entries by resourceAppId for easy lookup
+    by_app: dict[str, dict[str, Any]] = {}
+    for block in existing:
+        by_app[block["resourceAppId"]] = {
+            "resourceAppId": block["resourceAppId"],
+            "resourceAccess": list(block.get("resourceAccess", [])),
+        }
+
+    changed = False
+    for desired_block in desired:
+        app_id = desired_block["resourceAppId"]
+        if app_id not in by_app:
+            by_app[app_id] = {
+                "resourceAppId": app_id,
+                "resourceAccess": [],
+            }
+            changed = True
+        existing_ids = {e["id"] for e in by_app[app_id]["resourceAccess"]}
+        for entry in desired_block.get("resourceAccess", []):
+            if entry["id"] not in existing_ids:
+                by_app[app_id]["resourceAccess"].append(entry)
+                changed = True
+
+    return list(by_app.values()), changed
+
+
+def _graph_block_scope_ids(rra: list[dict[str, Any]]) -> set[str]:
+    """
+    Return the set of resourceAccess entry IDs in the MS Graph block of a
+    requiredResourceAccess list (only Scope-type entries).
+
+    Used to verify that all desired delegated scopes are present in the
+    app manifest after a PATCH.
+    """
+    for block in rra:
+        if block.get("resourceAppId") == GRAPH_APP_ID:
+            return {
+                e["id"]
+                for e in block.get("resourceAccess", [])
+                if e.get("type") == "Scope"
+            }
+    return set()
+
+
+def _merge_redirect_uris(
+    existing: list[str], desired: list[str]
+) -> tuple[list[str], bool]:
+    """Union desired URIs into existing ones (add only). Returns (merged, changed)."""
+    existing_set = set(existing)
+    to_add = [u for u in desired if u not in existing_set]
+    if not to_add:
+        return existing, False
+    return existing + to_add, True
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog=PROG,
+        description=(
+            "Create or reconcile an Entra ID OIDC web application and "
+            "service principal. Idempotent: re-running with the same "
+            "--name is safe."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=True,
+    )
+    parser.add_argument(
+        "-n",
+        "--name",
+        required=True,
+        metavar="NAME",
+        help="Display name of the app registration",
+    )
+    parser.add_argument(
+        "-o",
+        "--owner",
+        required=True,
+        metavar="UPN",
+        help="Owner UPN/email (e.g. user@example.com)",
+    )
+    parser.add_argument(
+        "-r",
+        "--redirect-uri",
+        dest="redirect_uris",
+        required=True,
+        action="append",
+        metavar="URI",
+        help="Web redirect URI (repeatable; at least one required)",
+    )
+    parser.add_argument(
+        "-t",
+        "--tenant",
+        default=None,
+        metavar="TENANT",
+        help="Tenant ID or domain to pass to the az token request",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="Emit a JSON result instead of a human-readable summary",
+    )
+    return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Colour helpers (suppressed when stdout is not a TTY or NO_COLOR is set)
+# ---------------------------------------------------------------------------
+
+
+def _setup_colour() -> dict[str, str]:
+    import os
+
+    if sys.stdout.isatty() and not os.environ.get("NO_COLOR"):
+        return {
+            "reset": "\033[0m",
+            "bold": "\033[1m",
+            "dim": "\033[2m",
+            "green": "\033[32m",
+            "yellow": "\033[33m",
+            "cyan": "\033[36m",
+        }
+    return {k: "" for k in ("reset", "bold", "dim", "green", "yellow", "cyan")}
+
+
+def _status_tag(status: str, c: dict[str, str]) -> str:
+    """Coloured status tag for human output."""
+    if status == "created":
+        return f"{c['green']}created{c['reset']}"
+    if status == "updated":
+        return f"{c['yellow']}updated{c['reset']}"
+    if status in ("existed", "unchanged"):
+        return f"{c['dim']}{status}{c['reset']}"
+    return status
+
+
+# ---------------------------------------------------------------------------
+# Main provisioning logic
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:  # noqa: C901 — long but linear
+    args = parse_args()
+
+    # -- preflight ----------------------------------------------------------
+    check_az_login()
+    token = get_graph_token(args.tenant)
+
+    # Tracks whether anything changed this run
+    any_changed = False
+    statuses: dict[str, str] = {}
+
+    # -- resolve owner UPN -> object ID ------------------------------------
+    step(f"Resolving owner '{args.owner}'\u2026")
+    try:
+        owner_obj = _graph_request(
+            "GET",
+            f"/users/{urllib.parse.quote(args.owner)}",
+            token,
+        )
+    except urllib.error.HTTPError as exc:
+        code, detail = _parse_error(exc)
+        if code == 404:
+            die(f"Owner '{args.owner}' not found in directory.", code=3)
+        die(f"Owner lookup failed ({code}): {detail}", code=3)
+
+    owner_id: str = owner_obj["id"]  # type: ignore[index]
+    info(f"owner object ID: {owner_id}")
+
+    # -- step 1: app registration (find-or-create + reconcile) -------------
+    step(f"Ensuring app registration '{args.name}'\u2026")
+    desired_rra = _desired_resource_access()
+
+    apps = graph_list(
+        "applications",
+        f"displayName eq '{args.name}'",
+        token,
+        select="id,appId,web,requiredResourceAccess,displayName",
+        description="Look up application by displayName",
+    )
+
+    if len(apps) > 1:
+        ids = ", ".join(a["appId"] for a in apps)
+        die(
+            f"Multiple app registrations named '{args.name}' exist ({ids}). "
+            "Rename or delete duplicates before re-running.",
+            code=4,
+        )
+
+    if not apps:
+        # Create fresh
+        app_body = {
+            "displayName": args.name,
+            "signInAudience": "AzureADMyOrg",
+            "web": {"redirectUris": args.redirect_uris},
+            "requiredResourceAccess": desired_rra,
+        }
+        app = graph(
+            "POST",
+            "/applications",
+            token,
+            app_body,
+            description="Create application",
+        )
+        app_id: str = app["appId"]  # type: ignore[index]
+        app_obj_id: str = app["id"]  # type: ignore[index]
+        statuses["app"] = "created"
+        any_changed = True
+        info(f"appId:     {app_id}")
+        info(f"object ID: {app_obj_id}")
+    else:
+        # Reconcile existing app
+        existing_app = apps[0]
+        app_id = existing_app["appId"]
+        app_obj_id = existing_app["id"]
+        info(f"found existing app — appId: {app_id}, object ID: {app_obj_id}")
+
+        patch: dict[str, Any] = {}
+
+        # Reconcile redirect URIs (union / add only)
+        existing_uris: list[str] = (existing_app.get("web") or {}).get(
+            "redirectUris", []
+        )
+        merged_uris, uris_changed = _merge_redirect_uris(
+            existing_uris, args.redirect_uris
+        )
+        if uris_changed:
+            patch["web"] = {"redirectUris": merged_uris}
+
+        # Reconcile requiredResourceAccess (union)
+        existing_rra: list[dict[str, Any]] = existing_app.get(
+            "requiredResourceAccess", []
+        )
+        merged_rra, rra_changed = _merge_resource_access(existing_rra, desired_rra)
+        if rra_changed:
+            patch["requiredResourceAccess"] = merged_rra
+
+        if patch:
+            graph(
+                "PATCH",
+                f"/applications/{app_obj_id}",
+                token,
+                patch,
+                expect_no_content=True,
+                description="Reconcile application",
+            )
+            statuses["app"] = "updated"
+            any_changed = True
+        else:
+            statuses["app"] = "unchanged"
+
+        # -- read-back verification -----------------------------------------
+        # Confirm every desired scope ID is present in requiredResourceAccess.
+        # This catches drift between independent runs (e.g. grant set in step 5
+        # before the manifest was updated) and corrects it with one extra PATCH.
+        desired_scope_ids = set(DELEGATED_SCOPES.values())
+        live_app = graph(
+            "GET",
+            f"/applications/{app_obj_id}?$select=requiredResourceAccess",
+            token,
+            description="Read back requiredResourceAccess",
+        )
+        live_rra: list[dict[str, Any]] = (live_app or {}).get(
+            "requiredResourceAccess", []
+        )
+        live_scope_ids = _graph_block_scope_ids(live_rra)
+        still_missing = desired_scope_ids - live_scope_ids
+
+        if still_missing:
+            missing_names = [
+                name for name, sid in DELEGATED_SCOPES.items() if sid in still_missing
+            ]
+            info(
+                f"read-back: {len(still_missing)} scope(s) missing from "
+                f"requiredResourceAccess after PATCH "
+                f"({', '.join(missing_names)}) — applying corrective PATCH"
+            )
+            corrective_rra, _ = _merge_resource_access(live_rra, desired_rra)
+            graph(
+                "PATCH",
+                f"/applications/{app_obj_id}",
+                token,
+                {"requiredResourceAccess": corrective_rra},
+                expect_no_content=True,
+                description="Corrective requiredResourceAccess PATCH",
+            )
+            # Final verification — error loudly if still broken
+            live_app2 = graph(
+                "GET",
+                f"/applications/{app_obj_id}?$select=requiredResourceAccess",
+                token,
+                description="Re-read requiredResourceAccess after corrective PATCH",
+            )
+            live_rra2: list[dict[str, Any]] = (live_app2 or {}).get(
+                "requiredResourceAccess", []
+            )
+            still_missing2 = desired_scope_ids - _graph_block_scope_ids(live_rra2)
+            if still_missing2:
+                missing_names2 = [
+                    name
+                    for name, sid in DELEGATED_SCOPES.items()
+                    if sid in still_missing2
+                ]
+                die(
+                    "requiredResourceAccess still missing scope(s) after "
+                    f"corrective PATCH: {', '.join(missing_names2)}. "
+                    "Check app manifest in the portal.",
+                    code=4,
+                )
+            statuses["app"] = "updated"
+            any_changed = True
+            info("read-back: corrective PATCH confirmed — all scopes now configured")
+        else:
+            info("read-back: all desired scopes present in requiredResourceAccess")
+
+        info(f"app: {statuses['app']}")
+
+    # -- step 2: service principal (find-or-create) ------------------------
+    step("Ensuring service principal\u2026")
+    sps = graph_list(
+        "servicePrincipals",
+        f"appId eq '{app_id}'",
+        token,
+        select="id",
+        description="Look up service principal by appId",
+    )
+
+    if sps:
+        sp_obj_id: str = sps[0]["id"]
+        statuses["sp"] = "existed"
+        info(f"found existing SP — object ID: {sp_obj_id}")
+    else:
+        sp = graph(
+            "POST",
+            "/servicePrincipals",
+            token,
+            {"appId": app_id},
+            description="Create service principal",
+        )
+        sp_obj_id = sp["id"]  # type: ignore[index]
+        statuses["sp"] = "created"
+        any_changed = True
+        info(f"SP object ID: {sp_obj_id}")
+
+    # -- step 3: owners (app + SP) — swallow "already exists" --------------
+    owner_ref = {"@odata.id": f"{GRAPH_BASE}/directoryObjects/{owner_id}"}
+
+    step("Ensuring owner on application\u2026")
+    _, app_owner_existed = graph_or_exists(
+        "POST",
+        f"/applications/{app_obj_id}/owners/$ref",
+        token,
+        owner_ref,
+        expect_no_content=True,
+        description="Add application owner",
+    )
+    statuses["app_owner"] = "existed" if app_owner_existed else "added"
+    if not app_owner_existed:
+        any_changed = True
+    info(f"app owner: {statuses['app_owner']}")
+
+    step("Ensuring owner on service principal\u2026")
+    _, sp_owner_existed = graph_or_exists(
+        "POST",
+        f"/servicePrincipals/{sp_obj_id}/owners/$ref",
+        token,
+        owner_ref,
+        expect_no_content=True,
+        description="Add service principal owner",
+    )
+    statuses["sp_owner"] = "existed" if sp_owner_existed else "added"
+    if not sp_owner_existed:
+        any_changed = True
+    info(f"SP owner: {statuses['sp_owner']}")
+
+    # -- step 4: look up the Microsoft Graph SP in tenant ------------------
+    step("Looking up Microsoft Graph service principal in tenant\u2026")
+    graph_sps = graph_list(
+        "servicePrincipals",
+        f"appId eq '{GRAPH_APP_ID}'",
+        token,
+        select="id",
+        description="Get Graph service principal",
+    )
+    if not graph_sps:
+        die(
+            "Microsoft Graph service principal not found in this tenant.",
+            code=4,
+        )
+    graph_sp_id: str = graph_sps[0]["id"]
+    info(f"Graph SP object ID: {graph_sp_id}")
+
+    # -- step 5: delegated permission grant (OIDC scopes + User.Read) ------
+    scope_string = " ".join(DELEGATED_SCOPES.keys())
+    step(f"Ensuring delegated scope grant ({scope_string})\u2026")
+
+    grants = graph_list(
+        "oauth2PermissionGrants",
+        f"clientId eq '{sp_obj_id}' and resourceId eq '{graph_sp_id}'",
+        token,
+        select="id,scope",
+        description="Look up delegated permission grant",
+    )
+
+    if not grants:
+        graph_with_retry(
+            "POST",
+            "/oauth2PermissionGrants",
+            token,
+            {
+                "clientId": sp_obj_id,
+                "consentType": "AllPrincipals",
+                "resourceId": graph_sp_id,
+                "scope": scope_string,
+            },
+            description="Grant delegated scopes",
+        )
+        statuses["delegated_grant"] = "created"
+        any_changed = True
+    else:
+        grant = grants[0]
+        if len(grants) > 1:
+            warn(
+                f"{len(grants)} delegated grants found; reconciling the first "
+                f"({grant['id']}) and ignoring extras."
+            )
+
+        # Union: add any missing desired scopes; never remove existing ones.
+        existing_scopes = set((grant.get("scope") or "").split())
+        desired_scopes = set(DELEGATED_SCOPES.keys())
+        missing = desired_scopes - existing_scopes
+
+        if not missing:
+            statuses["delegated_grant"] = "unchanged"
+        else:
+            merged_scopes = " ".join(sorted(existing_scopes | desired_scopes))
+            graph(
+                "PATCH",
+                f"/oauth2PermissionGrants/{grant['id']}",
+                token,
+                {"scope": merged_scopes},
+                expect_no_content=True,
+                description="Add missing delegated scopes",
+            )
+            statuses["delegated_grant"] = "updated"
+            any_changed = True
+
+    info(f"delegated grant: {statuses['delegated_grant']}")
+
+    # -- output ------------------------------------------------------------
+    result: dict[str, Any] = {
+        "appId": app_id,
+        "appObjectId": app_obj_id,
+        "spObjectId": sp_obj_id,
+        "displayName": args.name,
+        "owner": {
+            "upn": args.owner,
+            "objectId": owner_id,
+        },
+        "redirectUris": args.redirect_uris,
+        "permissions": {
+            "delegatedScopes": list(DELEGATED_SCOPES.keys()),
+        },
+        "adminConsentGranted": True,
+        "changed": any_changed,
+        "statuses": statuses,
+    }
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return
+
+    c = _setup_colour()
+    print()
+    heading = (
+        "App registration updated" if any_changed else "App registration up to date"
+    )
+    print(f"{c['bold']}{c['cyan']}{heading}{c['reset']}")
+    print(f"  {c['bold']}Display name  :{c['reset']} {result['displayName']}")
+    print(f"  {c['bold']}App ID (client){c['reset']} {result['appId']}")
+    print(f"  {c['bold']}App object ID :{c['reset']} {result['appObjectId']}")
+    print(f"  {c['bold']}SP object ID  :{c['reset']} {result['spObjectId']}")
+    print()
+    print(f"{c['bold']}Owner{c['reset']}")
+    print(f"  UPN:       {result['owner']['upn']}")
+    print(f"  Object ID: {result['owner']['objectId']}")
+    print()
+    print(f"{c['bold']}Redirect URIs{c['reset']}")
+    for uri in result["redirectUris"]:
+        print(f"  {uri}")
+    print()
+    print(f"{c['bold']}API permissions{c['reset']}")
+    for scope in result["permissions"]["delegatedScopes"]:
+        print(f"  {c['dim']}[Delegated]{c['reset']} {scope}")
+    print()
+    print(f"{c['bold']}Step statuses{c['reset']}")
+    for key, val in statuses.items():
+        print(f"  {key:<18} {_status_tag(val, c)}")
+    print()
+    print(f"{c['green']}Done.{c['reset']}")
+
+
+if __name__ == "__main__":
+    main()
