@@ -9,37 +9,31 @@ on managed hosts via the Ansible base role.
 bin/    Executable wrappers (sandboxed AI CLI tools, etc.)
 lib/    Sourced shell libraries
 etc/    Configuration assets (reserved)
+docs/   Per-script and per-library documentation
 ```
 
 ## Contents
 
 ### `bin/`
 
-The `bw*` wrappers enforce NSLS-II sandboxing policy (managed config,
-masked privileged binaries, ephemeral auth on shared accounts). See the
-NSLS-II coding-agents documentation for the policy these wrappers
-implement.
+| Script | Purpose | Docs |
+| --- | --- | --- |
+| `azoidcapp` | Create or reconcile an Entra ID OIDC app + service principal | [docs/azoidcapp.md](docs/azoidcapp.md) |
+| `bwclaude` | Claude CLI in a bubblewrap sandbox | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
+| `bwcodex` | OpenAI Codex CLI in a bubblewrap sandbox | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
+| `bwcopilot` | GitHub Copilot CLI in a bubblewrap sandbox | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
+| `bwopencode` | OpenCode in a bubblewrap sandbox | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
+| `gh-protect-branch` | Apply NSLS-II standard branch protection to a GitHub repo (all branches); enables secret scanning and push protection | [docs/gh-protect-branch.md](docs/gh-protect-branch.md) |
+| `pemdecompose` | List and verify certificates in a PEM file | [docs/pemdecompose.md](docs/pemdecompose.md) |
 
-| Script | Purpose |
-| --- | --- |
-| `azoidcapp` | Create an Entra ID OIDC app + SP with MS Graph permissions |
-| `bwclaude` | Run the Claude CLI inside a bubblewrap sandbox |
-| `bwcopilot` | Run the GitHub Copilot CLI inside a bubblewrap sandbox |
-| `bwopencode` | Run OpenCode inside a bubblewrap sandbox |
-| `bwcodex` | Run Codex inside a bubblewrap sandbox |
-| `pemdecompose` | List and verify certificates in a PEM file |
-
-The four `bw*` wrappers share `lib/bwrap_sandbox_lib.sh` for sandbox
-construction. `azoidcapp` and `pemdecompose` are standalone utilities
-with no sandbox dependency. See each script's `--help` for tool-specific
-options.
+All `bw*` wrappers share `lib/bwrap_sandbox_lib.sh` for sandbox construction.
 
 ### `lib/`
 
-| Library | Purpose |
-| --- | --- |
-| `bwrap_sandbox_lib.sh` | Shared sandbox-building primitives used by the `bw*` wrappers |
-| `gpg-passwd.sh` | `decrypt_env_file` helper for sourcing GPG-encrypted env files |
+| Library | Purpose | Docs |
+| --- | --- | --- |
+| `bwrap_sandbox_lib.sh` | Shared sandbox-building primitives for `bw*` wrappers | [docs/bw-wrappers.md](docs/bw-wrappers.md) |
+| `gpg-passwd.sh` | `decrypt_env_file` helper for GPG-encrypted env files | [docs/gpg-passwd.md](docs/gpg-passwd.md) |
 
 These libraries are sourced, not executed. Each library's header comment
 documents its public function surface.
@@ -69,13 +63,6 @@ export PATH="${N2SNSCRIPTS_BIN}:${PATH}"
 
 Add those three exports to your `~/.bashrc` or `~/.zshrc` for persistence.
 
-Alternately, if `~/.local/bin` is already in your path
-
-```bash
-stow -t ~/.local -S n2snscripts --ignore='etc' --ignore=README.md
-```
-
-
 ## Requirements
 
 - `bash` >= 4.x (the `bw*` wrappers use `[[ ]]` and arrays)
@@ -86,6 +73,7 @@ stow -t ~/.local -S n2snscripts --ignore='etc' --ignore=README.md
 - `openssl(1)` for `pemdecompose`
 - `python3 >= 3.9` (stdlib only, no pip dependencies) for `azoidcapp`
 - `az` (Azure CLI) logged in via `az login` for `azoidcapp`
+- `gh(1)` authenticated with `admin:repo` scope for `gh-protect-branch`
 
 ## Usage
 
@@ -133,10 +121,10 @@ See the library header for the full contract.
 ### `azoidcapp`
 
 Create or reconcile an Azure Entra ID OIDC web application and its
-service principal. Sets an owner on both objects, ensures Microsoft
-Graph API permissions (`User.Read.All` application app-role plus the
-standard OIDC delegated scopes `offline_access`, `email`, `openid`,
-and `profile`), and grants tenant-wide admin consent.
+service principal. Sets an owner on both objects, ensures the standard
+OIDC delegated Microsoft Graph scopes (`openid`, `email`, `profile`,
+`offline_access`) plus the delegated `User.Read` scope, and grants
+tenant-wide admin consent for those delegated permissions.
 
 The script is **idempotent**: re-running with the same `--name` is
 safe. Existing objects are reused; redirect URIs are unioned (never
@@ -203,3 +191,6 @@ some file, `3` openssl parse error, `4` `--verify` failed for at least
 one chain link.
 
 Requires only `openssl`.
+
+See the per-script doc pages under [`docs/`](docs/) for full usage,
+options, and caveats.

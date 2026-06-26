@@ -8,7 +8,7 @@
 #
 # Two approved auth paths are supported (configured in ~/.codex/config.toml):
 #   - Hermes (AIFAPIM) routing — provider block points at
-#       https://hermes.nsls2.bnl.gov/openai/v1 with x-api-key header;
+#       https://${AIFAPIM_HOST}/openai/v1 with x-api-key header;
 #       wrapper plumbs AIFAPIM_HOST + AIFAPIM_API_KEY through.  Set
 #       OPENAI_API_KEY=dummy on the host or rely on the wrapper default.
 #   - BNL ITD ChatGPT subscription — `codex login` OAuth flow persists

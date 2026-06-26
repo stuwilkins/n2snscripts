@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# gh-protect-branch — Apply NSLS-II standard branch protection to a GitHub repo.
+#
+# Protections applied (matches NSLS-II repo policy):
+#
+#   Repository ruleset "nsls2-branch-protection" (all branches via ~ALL):
+#   - PRs required (no direct push)
+#   - Require >= 1 approving review
+#   - Dismiss stale reviews when new commits are pushed
+#   - Require the last pusher's commit to be approved by someone else
+#   - Require code owner review (CODEOWNERS entries, if present)
+#   - Require all PR conversations to be resolved before merge
+#   - Block branch deletion
+#   - Block force pushes (non-fast-forward)
+#   - Require signed commits (default on; suppress with --no-sign-commits)
+#   Ruleset is created on first run and updated (not duplicated) on re-runs.
+#
+#   Classic branch protection (named branch only):
+#   - Enforce all rules on admins
+#   - Optionally restrict stale-review dismissal to a named team (--approvers)
+#   - Belt-and-suspenders signed commits on the named branch
+#
+#   Repository settings:
+#   - Secret scanning and push protection enabled
+#
+# Requires:
+#   - gh(1) authenticated with admin:repo scope on the target repository
+#
+# Usage:
+#   gh-protect-branch [--approvers <team-slug>] [--no-sign-commits] <owner/repo> [branch]
+#   gh-protect-branch --help
+#
+# Examples:
+#   gh-protect-branch NSLS2/n2snscripts
+#   gh-protect-branch NSLS2/n2sndocs main
+#   gh-protect-branch --approvers n2sn-admins NSLS2/n2snscripts
+#   gh-protect-branch --approvers n2sn-admins NSLS2/n2sndocs main
+#   gh-protect-branch --no-sign-commits NSLS2/n2snscripts
+#
+# Exit codes:
+#   0  success
+#   1  usage error or missing dependency
+#   2  gh not authenticated
+#   3  API call failed
+
+set -euo pipefail
+
+RULESET_NAME="nsls2-branch-protection"
+
+show_help() {
+    sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+APPROVERS_TEAM=""
+SIGN_COMMITS="true"
+
+while [[ "${1:-}" == -* ]]; do
+    case "$1" in
+        -h | --help)
+            show_help
+            exit 0
+            ;;
+        --approvers)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --approvers requires a team slug argument." >&2
+                exit 1
+            fi
+            APPROVERS_TEAM="$2"
+            shift 2
+            ;;
+        --no-sign-commits)
+            SIGN_COMMITS="false"
+            shift
+            ;;
+        *)
+            echo "Error: unknown option: $1" >&2
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+if [[ -z "${1:-}" ]]; then
+    show_help
+    exit 1
+fi
+
+REPO="$1"
+BRANCH="${2:-main}"
+
+if [[ ! "${REPO}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "Error: repository must be in 'owner/repo' format (got: ${REPO})" >&2
+    exit 1
+fi
+
+command -v gh > /dev/null || {
+    echo "Error: gh CLI not found in PATH." >&2
+    exit 1
+}
+gh auth status > /dev/null 2>&1 || {
+    echo "Error: gh is not authenticated. Run 'gh auth login' first." >&2
+    exit 2
+}
+
+echo "Applying branch protection to ${REPO}@${BRANCH}..."
+
+# Build the rules array for the ruleset. Signed commits are conditional.
+if [[ "${SIGN_COMMITS}" == "true" ]]; then
+    SIGN_RULE=',
+    { "type": "required_signatures" }'
+else
+    SIGN_RULE=''
+fi
+
+# Compose the ruleset payload (used for both create and update).
+RULESET_PAYLOAD=$(printf '{
+  "name": "%s",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["~ALL"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 1,
+        "dismiss_stale_reviews_on_push": true,
+        "require_last_push_approval": true,
+        "require_code_owner_review": true,
+        "required_review_thread_resolution": true
+      }
+    }%s
+  ]
+}' "${RULESET_NAME}" "${SIGN_RULE}")
+
+# 1) Repository ruleset (all branches via ~ALL) — idempotent.
+#    Check for an existing ruleset with our name; PUT if found, POST if not.
+RULESET_ID=$(gh api "repos/${REPO}/rulesets" \
+    --jq ".[] | select(.name==\"${RULESET_NAME}\") | .id" 2> /dev/null || true)
+
+if [[ -n "${RULESET_ID}" ]]; then
+    printf '%s' "${RULESET_PAYLOAD}" |
+        gh api -X PUT "repos/${REPO}/rulesets/${RULESET_ID}" \
+            -H "Accept: application/vnd.github+json" \
+            --input - > /dev/null
+    RULESET_ACTION="updated"
+else
+    printf '%s' "${RULESET_PAYLOAD}" |
+        gh api -X POST "repos/${REPO}/rulesets" \
+            -H "Accept: application/vnd.github+json" \
+            --input - > /dev/null
+    RULESET_ACTION="created"
+fi
+
+# 2) Classic named-branch protection — enforce_admins + optional dismissal restrictions.
+#    The Ruleset covers the substantive rules for all branches; the classic rule
+#    adds admin enforcement on the named branch and (when --approvers is set)
+#    restricts who can dismiss stale reviews to the named team.
+if [[ -n "${APPROVERS_TEAM}" ]]; then
+    DISMISSAL_JSON='"dismissal_restrictions": { "teams": ["'"${APPROVERS_TEAM}"'"] },'
+else
+    DISMISSAL_JSON=''
+fi
+
+printf '{
+  "required_status_checks": null,
+  "enforce_admins": true,
+  "required_pull_request_reviews": {
+    %s
+    "required_approving_review_count": 1,
+    "dismiss_stale_reviews": true,
+    "require_last_push_approval": true,
+    "require_code_owner_reviews": true
+  },
+  "restrictions": null,
+  "required_conversation_resolution": true
+}' "${DISMISSAL_JSON}" |
+    gh api -X PUT "repos/${REPO}/branches/${BRANCH}/protection" \
+        -H "Accept: application/vnd.github+json" \
+        --input - > /dev/null
+
+# 3) Belt-and-suspenders signed commits on the named branch via classic API.
+#    The Ruleset already requires signed commits on ~ALL branches, but the classic
+#    required_signatures endpoint provides an additional enforcement layer on the
+#    named branch.
+if [[ "${SIGN_COMMITS}" == "true" ]]; then
+    gh api -X POST "repos/${REPO}/branches/${BRANCH}/protection/required_signatures" \
+        -H "Accept: application/vnd.github+json" > /dev/null
+fi
+
+# 4) Secret scanning + push protection (repository-level)
+printf '{
+  "security_and_analysis": {
+    "secret_scanning": { "status": "enabled" },
+    "secret_scanning_push_protection": { "status": "enabled" }
+  }
+}' | gh api -X PATCH "repos/${REPO}" \
+      -H "Accept: application/vnd.github+json" \
+      --input - > /dev/null
+
+echo "Done. ${REPO}@${BRANCH} protected:"
+echo "  - Ruleset '${RULESET_NAME}' ${RULESET_ACTION} (all branches via ~ALL)"
+echo "    PR + 1 approval + last-push + CODEOWNERS + conversation resolution"
+echo "    + deletion blocked + force-push blocked"
+if [[ "${SIGN_COMMITS}" == "true" ]]; then
+    echo "    + signed commits required"
+fi
+echo "  - Classic protection on ${BRANCH}: admins enforced"
+if [[ -n "${APPROVERS_TEAM}" ]]; then
+    echo "    + stale-review dismissal restricted to team '${APPROVERS_TEAM}'"
+fi
+if [[ "${SIGN_COMMITS}" == "true" ]]; then
+    echo "    + signed commits required on ${BRANCH}"
+fi
+echo "  - Secret scanning and push protection enabled"
