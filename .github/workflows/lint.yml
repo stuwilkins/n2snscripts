@@ -66,6 +66,7 @@ jobs:
           FROM_REF: ${{ steps.refs.outputs.from_ref }}
           TO_REF: ${{ steps.refs.outputs.to_ref }}
         run: |
+          set -o pipefail
           if [[ -n "$FROM_REF" ]]; then
             pixi run -e dev pre-commit run \
               --from-ref "$FROM_REF" \
