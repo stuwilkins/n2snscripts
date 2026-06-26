@@ -2,3 +2,10 @@
 __pycache__/
 *.py[cod]
 *$py.class
+
+# pixi environments and caches
+.pixi/
+
+# Tool caches
+.ruff_cache/
+.mypy_cache/

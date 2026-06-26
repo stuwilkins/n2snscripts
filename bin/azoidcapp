@@ -48,7 +48,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any
+from typing import Any, NoReturn
 
 # ---------------------------------------------------------------------------
 # Python version guard
@@ -83,7 +83,7 @@ DELEGATED_SCOPES: dict[str, str] = {
 PROG = "azoidcapp"
 
 
-def die(msg: str, code: int = 1) -> None:
+def die(msg: str, code: int = 1) -> NoReturn:
     print(f"{PROG}: {msg}", file=sys.stderr)
     sys.exit(code)
 
@@ -134,8 +134,7 @@ def check_az_login() -> None:
         )
     except FileNotFoundError:
         die(
-            "'az' CLI not found on PATH. "
-            "Install the Azure CLI: https://aka.ms/azure-cli",
+            "'az' CLI not found on PATH. Install the Azure CLI: https://aka.ms/azure-cli",
             code=2,
         )
     except subprocess.CalledProcessError:
@@ -239,9 +238,7 @@ def graph(
     """Graph call; dies with code 4 on HTTP failure."""
     label = description or f"{method} {path}"
     try:
-        return _graph_request(
-            method, path, token, body, expect_no_content=expect_no_content
-        )
+        return _graph_request(method, path, token, body, expect_no_content=expect_no_content)
     except urllib.error.HTTPError as exc:
         code, detail = _parse_error(exc)
         die(f"{label} failed ({code}): {detail}", code=4)
@@ -290,9 +287,7 @@ def graph_or_exists(
     """
     label = description or f"{method} {path}"
     try:
-        resp = _graph_request(
-            method, path, token, body, expect_no_content=expect_no_content
-        )
+        resp = _graph_request(method, path, token, body, expect_no_content=expect_no_content)
         return resp, False
     except urllib.error.HTTPError as exc:
         code, detail = _parse_error(exc)
@@ -326,9 +321,7 @@ def graph_with_retry(
     label = description or f"{method} {path}"
     for attempt in range(1, retries + 1):
         try:
-            resp = _graph_request(
-                method, path, token, body, expect_no_content=expect_no_content
-            )
+            resp = _graph_request(method, path, token, body, expect_no_content=expect_no_content)
             return resp, False
         except urllib.error.HTTPError as exc:
             code, detail = _parse_error(exc)
@@ -338,10 +331,7 @@ def graph_with_retry(
 
             if code in (400, 404, 503) and attempt < retries:
                 wait = backoff * attempt
-                warn(
-                    f"{label}: HTTP {code} (attempt {attempt}/{retries}), "
-                    f"retrying in {wait:.0f}s\u2026"
-                )
+                warn(f"{label}: HTTP {code} (attempt {attempt}/{retries}), retrying in {wait:.0f}s\u2026")
                 time.sleep(wait)
                 continue
 
@@ -377,10 +367,7 @@ def _desired_resource_access() -> list[dict[str, Any]]:
     return [
         {
             "resourceAppId": GRAPH_APP_ID,
-            "resourceAccess": [
-                {"id": scope_id, "type": "Scope"}
-                for scope_id in DELEGATED_SCOPES.values()
-            ],
+            "resourceAccess": [{"id": scope_id, "type": "Scope"} for scope_id in DELEGATED_SCOPES.values()],
         }
     ]
 
@@ -432,17 +419,11 @@ def _graph_block_scope_ids(rra: list[dict[str, Any]]) -> set[str]:
     """
     for block in rra:
         if block.get("resourceAppId") == GRAPH_APP_ID:
-            return {
-                e["id"]
-                for e in block.get("resourceAccess", [])
-                if e.get("type") == "Scope"
-            }
+            return {e["id"] for e in block.get("resourceAccess", []) if e.get("type") == "Scope"}
     return set()
 
 
-def _merge_redirect_uris(
-    existing: list[str], desired: list[str]
-) -> tuple[list[str], bool]:
+def _merge_redirect_uris(existing: list[str], desired: list[str]) -> tuple[list[str], bool]:
     """Union desired URIs into existing ones (add only). Returns (merged, changed)."""
     existing_set = set(existing)
     to_add = [u for u in desired if u not in existing_set]
@@ -621,19 +602,13 @@ def main() -> None:  # noqa: C901 — long but linear
         patch: dict[str, Any] = {}
 
         # Reconcile redirect URIs (union / add only)
-        existing_uris: list[str] = (existing_app.get("web") or {}).get(
-            "redirectUris", []
-        )
-        merged_uris, uris_changed = _merge_redirect_uris(
-            existing_uris, args.redirect_uris
-        )
+        existing_uris: list[str] = (existing_app.get("web") or {}).get("redirectUris", [])
+        merged_uris, uris_changed = _merge_redirect_uris(existing_uris, args.redirect_uris)
         if uris_changed:
             patch["web"] = {"redirectUris": merged_uris}
 
         # Reconcile requiredResourceAccess (union)
-        existing_rra: list[dict[str, Any]] = existing_app.get(
-            "requiredResourceAccess", []
-        )
+        existing_rra: list[dict[str, Any]] = existing_app.get("requiredResourceAccess", [])
         merged_rra, rra_changed = _merge_resource_access(existing_rra, desired_rra)
         if rra_changed:
             patch["requiredResourceAccess"] = merged_rra
@@ -663,16 +638,12 @@ def main() -> None:  # noqa: C901 — long but linear
             token,
             description="Read back requiredResourceAccess",
         )
-        live_rra: list[dict[str, Any]] = (live_app or {}).get(
-            "requiredResourceAccess", []
-        )
+        live_rra: list[dict[str, Any]] = (live_app or {}).get("requiredResourceAccess", [])
         live_scope_ids = _graph_block_scope_ids(live_rra)
         still_missing = desired_scope_ids - live_scope_ids
 
         if still_missing:
-            missing_names = [
-                name for name, sid in DELEGATED_SCOPES.items() if sid in still_missing
-            ]
+            missing_names = [name for name, sid in DELEGATED_SCOPES.items() if sid in still_missing]
             info(
                 f"read-back: {len(still_missing)} scope(s) missing from "
                 f"requiredResourceAccess after PATCH "
@@ -694,16 +665,10 @@ def main() -> None:  # noqa: C901 — long but linear
                 token,
                 description="Re-read requiredResourceAccess after corrective PATCH",
             )
-            live_rra2: list[dict[str, Any]] = (live_app2 or {}).get(
-                "requiredResourceAccess", []
-            )
+            live_rra2: list[dict[str, Any]] = (live_app2 or {}).get("requiredResourceAccess", [])
             still_missing2 = desired_scope_ids - _graph_block_scope_ids(live_rra2)
             if still_missing2:
-                missing_names2 = [
-                    name
-                    for name, sid in DELEGATED_SCOPES.items()
-                    if sid in still_missing2
-                ]
+                missing_names2 = [name for name, sid in DELEGATED_SCOPES.items() if sid in still_missing2]
                 die(
                     "requiredResourceAccess still missing scope(s) after "
                     f"corrective PATCH: {', '.join(missing_names2)}. "
@@ -823,10 +788,7 @@ def main() -> None:  # noqa: C901 — long but linear
     else:
         grant = grants[0]
         if len(grants) > 1:
-            warn(
-                f"{len(grants)} delegated grants found; reconciling the first "
-                f"({grant['id']}) and ignoring extras."
-            )
+            warn(f"{len(grants)} delegated grants found; reconciling the first ({grant['id']}) and ignoring extras.")
 
         # Union: add any missing desired scopes; never remove existing ones.
         existing_scopes = set((grant.get("scope") or "").split())
@@ -875,9 +837,7 @@ def main() -> None:  # noqa: C901 — long but linear
 
     c = _setup_colour()
     print()
-    heading = (
-        "App registration updated" if any_changed else "App registration up to date"
-    )
+    heading = "App registration updated" if any_changed else "App registration up to date"
     print(f"{c['bold']}{c['cyan']}{heading}{c['reset']}")
     print(f"  {c['bold']}Display name  :{c['reset']} {result['displayName']}")
     print(f"  {c['bold']}App ID (client){c['reset']} {result['appId']}")

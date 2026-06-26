@@ -1,0 +1,4 @@
+---
+# MD013 (line-length) is disabled: table rows and long URLs in docs/
+# legitimately exceed 80 chars and reflowing them adds no value.
+MD013: false

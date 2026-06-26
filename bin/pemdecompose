@@ -59,7 +59,7 @@ FILES=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -h|--help)
+        -h | --help)
             usage
             exit 0
             ;;
@@ -67,11 +67,11 @@ while [[ $# -gt 0 ]]; do
             VERIFY=1
             shift
             ;;
-        -q|--quiet)
+        -q | --quiet)
             QUIET=1
             shift
             ;;
-        --no-color|--no-colour)
+        --no-color | --no-colour)
             NO_COLOR_FLAG=1
             shift
             ;;
@@ -152,22 +152,22 @@ split_certs() {
 
 # Print just the subject DN (everything after "subject=").
 cert_subject_only() {
-    openssl x509 -noout -subject -nameopt RFC2253 2>/dev/null \
-        | sed -e 's/^subject=//'
+    openssl x509 -noout -subject -nameopt RFC2253 2> /dev/null |
+          sed -e 's/^subject=//'
 }
 
 # Print just the issuer DN.
 cert_issuer_only() {
-    openssl x509 -noout -issuer -nameopt RFC2253 2>/dev/null \
-        | sed -e 's/^issuer=//'
+    openssl x509 -noout -issuer -nameopt RFC2253 2> /dev/null |
+          sed -e 's/^issuer=//'
 }
 
 # Print the top-level Signature Algorithm name (e.g. ecdsa-with-SHA384,
 # sha256WithRSAEncryption, ED25519). Returns nonzero if openssl can't
 # parse the block.
 cert_sigalg() {
-    openssl x509 -noout -text 2>/dev/null \
-        | awk '/Signature Algorithm:/ {
+    openssl x509 -noout -text 2> /dev/null |
+          awk '/Signature Algorithm:/ {
                   sub(/^.*Signature Algorithm:[[:space:]]*/, "")
                   print; exit
               }'
@@ -259,8 +259,8 @@ process_file() {
 
             local cur_issuer nxt_subject
             cur_issuer=$(printf '%s' "${blocks[$j]}" | cert_issuer_only) || true
-            nxt_subject=$(printf '%s' "${blocks[$((j + 1))]}" \
-                | cert_subject_only) || true
+            nxt_subject=$(printf '%s' "${blocks[$((j + 1))]}" |
+                  cert_subject_only) || true
 
             local dn_ok=0
             if [[ -n "$cur_issuer" && "$cur_issuer" == "$nxt_subject" ]]; then
@@ -269,7 +269,7 @@ process_file() {
 
             local sig_ok=0
             if openssl verify -no_check_time -partial_chain \
-                -CAfile "$nxt" "$cur" >/dev/null 2>&1; then
+                -CAfile "$nxt" "$cur" > /dev/null 2>&1; then
                 sig_ok=1
             fi
 

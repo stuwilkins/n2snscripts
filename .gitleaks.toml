@@ -1,0 +1,12 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Public MS Graph delegated-scope GUIDs in azoidcapp (not secrets)"
+paths = ['''bin/azoidcapp''']
+regexes = ['''[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}''']
+
+[[allowlists]]
+description = "Example AIFAPIM_HOST value in bwclaude help text (not a secret)"
+paths = ['''bin/bwclaude''']
+regexes = ['''AIFAPIM_HOST=hermes\.nsls2\.bnl\.gov''']
