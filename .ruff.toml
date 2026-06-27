@@ -1,0 +1,6 @@
+# Project Python style. 120-col line length kept from the prior super-linter
+# baseline; matched by ruff format and ruff check.
+line-length = 120
+
+[lint]
+ignore = ["E203"]

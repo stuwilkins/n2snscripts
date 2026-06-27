@@ -15,7 +15,8 @@ _Include or link to test output here._
 _DO NOT POST SENSITIVE INFORMATION HERE._
 
 ## Checklist
+
 - [ ] Edit the sections above with relevant information
 - [ ] Update in-repo documentation, if applicable
-- [ ] Run super-linter locally (or wait for CI) — see `.github/workflows/super-linter.yml`
+- [ ] Run `pixi run -e dev lint` locally (or wait for CI) — see `.github/workflows/lint.yml`
 - [ ] Test the changes on a representative managed host (or `runansible` deployment)
