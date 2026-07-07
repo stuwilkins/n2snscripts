@@ -466,6 +466,7 @@ main() {
     build_base_sandbox
     build_binary_masks
     build_proc_dev_tmp
+    build_sys_mounts
     build_etc_mounts
     build_home_tmpfs
     build_workdir_mount

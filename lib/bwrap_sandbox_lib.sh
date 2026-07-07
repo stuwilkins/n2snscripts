@@ -7,7 +7,8 @@
 #   - Git config include-path parsing
 #   - Sandbox PATH construction
 #   - Shell detection
-#   - All shared bwrap mounts: base system, binary masking, /etc, home tmpfs,
+#   - All shared bwrap mounts: base system, binary masking, /sys (cpu +
+#     node topology, read-only), /etc, home tmpfs,
 #     working directory, git config, pixi, ccache, npm, user bin, NSLS-II,
 #     dynamic tool mounts, user-supplied extra paths (--ro-path / --rw-path)
 #   - Environment variable framework (clean env + passthrough)
@@ -836,6 +837,36 @@ build_proc_dev_tmp() {
     if [[ "${FORCE_NEW_SESSION}" -ne 1 ]] && [[ "${KERNEL_HAS_TIOCSTI_CAP_GUARD}" -eq 1 ]]; then
         BWRAP_ARGS+=(--bind /dev/null /dev/tty)
     fi
+}
+
+# ── Selective /sys (read-only) ───────────────────────────────────
+# Expose only CPU and NUMA-node topology so tools can size thread
+# pools and place work sensibly (nproc/hwloc/OpenMP/BLAS, NUMA-aware
+# allocators).  Everything else under /sys is deliberately omitted.
+#
+# Scope and rationale:
+#   /sys/devices/system/cpu   — CPU topology, core/thread counts,
+#                               online mask, cache layout.
+#   /sys/devices/system/node  — NUMA node layout (cpulist, meminfo,
+#                               distance); consulted by hwloc and
+#                               NUMA-aware threading/BLAS libraries.
+#
+# Mounted read-only (--ro-bind), never --dev-bind: sysfs stays
+# non-writable so the classic write vectors (changing hardware state,
+# uevent helpers, cgroup/security nodes) are out of reach.  We do NOT
+# bind all of /sys — that would pull in /sys/kernel, /sys/fs/cgroup,
+# /sys/class, /sys/firmware, /sys/power, etc.  The only residual
+# exposure from these two subtrees is host hardware fingerprinting
+# (an info leak, largely redundant with /proc/cpuinfo which is already
+# visible via --proc), not privilege escalation.
+#
+# --ro-bind-try so the sandbox still works on hosts/kernels where a
+# node is absent (e.g. non-NUMA kernels lacking /sys/devices/system/node).
+build_sys_mounts() {
+    BWRAP_ARGS+=(
+        --ro-bind-try /sys/devices/system/cpu  /sys/devices/system/cpu
+        --ro-bind-try /sys/devices/system/node /sys/devices/system/node
+    )
 }
 
 # ── Selective /etc (read-only) ───────────────────────────────────
