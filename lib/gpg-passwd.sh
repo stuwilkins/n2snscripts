@@ -57,7 +57,8 @@ decrypt_env_file() {
 
     local var value
     for var in "${required_vars[@]}"; do
-        eval "value=\${$var:-}"
+        local -n _ref="$var"
+        value="${_ref:-}"
         if [[ -z "$value" ]]; then
             printf 'decrypt_env_file: required variable %s is still empty after decrypt.\n' "$var" >&2
             return 2

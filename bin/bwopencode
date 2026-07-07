@@ -372,11 +372,11 @@ build_opencode_env() {
     pass_through_if_set AIFAPIM_API_KEY
 
     local _key
-    for _key in $(compgen -e); do
+    while IFS= read -r _key; do
         if [[ "${_key}" == OPENCODE_* ]]; then
             BWRAP_ARGS+=(--setenv "${_key}" "${!_key}")
         fi
-    done
+    done < <(compgen -e)
 }
 
 # ═══════════════════════════════════════════════════════════════════

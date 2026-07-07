@@ -69,6 +69,12 @@ BWRAP_ARGS=()
 declare -A _MOUNTED_PREFIXES=()
 _EXTRA_PATH_DIRS=()
 
+# Cached result of `npm prefix -g` (resolved at most once per run).
+# _NPM_PREFIX_RESOLVED flips to 1 after the first lookup; _NPM_PREFIX holds
+# the value (empty string if npm is absent or the lookup failed).
+_NPM_PREFIX=""
+_NPM_PREFIX_RESOLVED=0
+
 # Sandbox environment
 SANDBOX_PATH=""
 SANDBOX_SHELL=""
@@ -92,6 +98,18 @@ _GIT_ROOT=""
 # Shared helper functions
 # ═══════════════════════════════════════════════════════════════════
 
+# _version_ge A B
+#   Return 0 (true) if dotted version A is greater than or equal to B.
+#   Uses `sort -V` (GNU coreutils, bash 4.1-era and later) so that
+#   multi-component versions like 0.11.0 sort correctly against 0.5.0 —
+#   a plain string/integer comparison would mis-order 0.11 vs 0.5.
+_version_ge() {
+    local a="$1" b="$2"
+    [[ "${a}" == "${b}" ]] && return 0
+    # If the lexicographically-smallest version (per sort -V) is B, then A > B.
+    [[ "$(printf '%s\n%s\n' "${a}" "${b}" | sort -V | head -n1)" == "${b}" ]]
+}
+
 # Feature detection by parsing the version string — much cheaper than
 # grepping --help.
 #
@@ -102,27 +120,18 @@ detect_bwrap_capabilities() {
     local _bwrap_ver
     _bwrap_ver="$(bwrap --version)"
     _bwrap_ver="${_bwrap_ver##* }"            # "bubblewrap 0.11.0" -> "0.11.0"
-    local _bw_major _bw_minor _bw_patch
-    IFS='.' read -r _bw_major _bw_minor _bw_patch <<< "${_bwrap_ver}"
-    _bw_patch="${_bw_patch:-0}"  # default to 0 if no patch version
 
     # --clearenv: Start with an empty environment (added in 0.5.0)
     # Fallback: manually unset all host env vars with --unsetenv
     HAS_CLEARENV=0
-    if [[ "${_bw_major}" -gt 0 ]] || { [[ "${_bw_major}" -eq 0 ]] && [[ "${_bw_minor}" -ge 5 ]]; }; then
-        HAS_CLEARENV=1
-    fi
+    _version_ge "${_bwrap_ver}" "0.5.0" && HAS_CLEARENV=1
 
     # Bind over ro-bind: ability to bind-mount on top of a read-only bind
     # mount (e.g., masking /usr/bin/ssh after --ro-bind /usr /usr).
     # This works in 0.6.3+; earlier versions fail with "Permission denied".
     # Fallback: skip binary masking (security reduction — tools remain accessible)
     HAS_BIND_OVER_RO=0
-    if [[ "${_bw_major}" -gt 0 ]] ||
-        { [[ "${_bw_major}" -eq 0 ]] && [[ "${_bw_minor}" -gt 6 ]]; } ||
-        { [[ "${_bw_major}" -eq 0 ]] && [[ "${_bw_minor}" -eq 6 ]] && [[ "${_bw_patch}" -ge 3 ]]; }; then
-        HAS_BIND_OVER_RO=1
-    fi
+    _version_ge "${_bwrap_ver}" "0.6.3" && HAS_BIND_OVER_RO=1
 }
 
 # Detect kernel-level security features that affect bwrap argument choice.
@@ -140,18 +149,12 @@ detect_bwrap_capabilities() {
 #   (terminal resize) is delivered correctly from tmux and other
 #   multiplexers to the sandboxed process.
 detect_kernel_capabilities() {
-    local _kver _kmajor _kminor
+    local _kver
     _kver="$(uname -r)"
     _kver="${_kver%%-*}"            # strip suffix e.g. "5.14.0-427.el9" -> "5.14.0"
-    IFS='.' read -r _kmajor _kminor _ <<< "${_kver}"
-    _kmajor="${_kmajor:-0}"
-    _kminor="${_kminor:-0}"
 
     KERNEL_HAS_TIOCSTI_CAP_GUARD=0
-    if [[ "${_kmajor}" -gt 5 ]] ||
-        { [[ "${_kmajor}" -eq 5 ]] && [[ "${_kminor}" -ge 14 ]]; }; then
-        KERNEL_HAS_TIOCSTI_CAP_GUARD=1
-    fi
+    _version_ge "${_kver}" "5.14" && KERNEL_HAS_TIOCSTI_CAP_GUARD=1
 }
 
 detect_shell() {
@@ -163,6 +166,50 @@ detect_shell() {
 # bind so we never emit duplicate (or redundant sub-path) mounts.
 # Keys are canonical paths; value is always 1.
 # Pre-populated with unconditional mounts in build_dynamic_tool_mounts.
+
+# _get_npm_prefix
+#   Echo the npm global prefix (`npm prefix -g`), caching the result so the
+#   subprocess is forked at most once per run even when several symlinked
+#   tools are resolved.  Echoes the empty string if npm is not installed or
+#   the lookup fails.
+_get_npm_prefix() {
+    if [[ "${_NPM_PREFIX_RESOLVED}" -eq 0 ]]; then
+        _NPM_PREFIX="$(npm prefix -g 2> /dev/null || true)"
+        _NPM_PREFIX_RESOLVED=1
+    fi
+    printf '%s' "${_NPM_PREFIX}"
+}
+
+# _emit_home_intermediate_dirs DIR [MODE]
+#   Emit `--dir` BWRAP_ARGS for the ancestor components of DIR that live
+#   under $HOME, so the eventual bind mount point exists inside the tmpfs
+#   $HOME (which starts out with no subdirectories).  No-op when DIR is not
+#   under $HOME.
+#
+#   MODE:
+#     "ancestors" (default) — emit --dir for every component strictly
+#                  BETWEEN $HOME and DIR; DIR itself is left out because it
+#                  will be the bind mount point.
+#     "inclusive" — also emit --dir for DIR itself (use when DIR is a parent
+#                  directory that must exist, e.g. the directory holding a
+#                  file bind, or a read-write directory bind point).
+_emit_home_intermediate_dirs() {
+    local dir="$1" mode="${2:-ancestors}"
+    [[ "${dir}" == "${_HOME}"/* ]] || return 0
+    local _rel="${dir#"${_HOME}"/}"
+    local _accum="${_HOME}"
+    local _parts _i _last
+    IFS='/' read -ra _parts <<< "${_rel}"
+    if [[ "${mode}" == "inclusive" ]]; then
+        _last=${#_parts[@]}
+    else
+        _last=$((${#_parts[@]} - 1))
+    fi
+    for ((_i = 0; _i < _last; _i++)); do
+        _accum="${_accum}/${_parts[$_i]}"
+        BWRAP_ARGS+=(--dir "${_accum}")
+    done
+}
 
 # _mount_ro_dir_if_needed DIR
 #   Bind-mount DIR read-only into the sandbox, unless it (or a parent
@@ -177,12 +224,15 @@ _mount_ro_dir_if_needed() {
     local dir="$1"
     [[ -d "${dir}" ]] || return 0
 
-    # Check whether dir is already covered by a registered prefix.
+    # Check whether dir is already covered by a registered prefix.  The walk
+    # tests every ancestor including "/" itself so a (theoretical) registered
+    # "/" prefix would de-duplicate correctly.
     local check="${dir}"
-    while [[ "${check}" != "/" ]]; do
+    while :; do
         if [[ -n "${_MOUNTED_PREFIXES["${check}"]:-}" ]]; then
             return 0  # already covered
         fi
+        [[ "${check}" == "/" ]] && break
         check="${check%/*}"
         [[ -z "${check}" ]] && check="/"
     done
@@ -193,17 +243,9 @@ _mount_ro_dir_if_needed() {
     _check_path_safe "${dir}" "dynamic mount"
 
     # Create intermediate --dir entries for paths under $HOME (the
-    # tmpfs $HOME has no subdirectories yet).
-    if [[ "${dir}" == "${_HOME}"/* ]]; then
-        local _rel="${dir#"${_HOME}"/}"
-        local _accum="${_HOME}"
-        local _parts _i
-        IFS='/' read -ra _parts <<< "${_rel}"
-        for ((_i = 0; _i < ${#_parts[@]} - 1; _i++)); do
-            _accum="${_accum}/${_parts[$_i]}"
-            BWRAP_ARGS+=(--dir "${_accum}")
-        done
-    fi
+    # tmpfs $HOME has no subdirectories yet).  DIR is the bind mount point,
+    # so only its ancestors are pre-created.
+    _emit_home_intermediate_dirs "${dir}"
 
     BWRAP_ARGS+=(--ro-bind "${dir}" "${dir}")
     _MOUNTED_PREFIXES["${dir}"]=1
@@ -231,7 +273,7 @@ resolve_and_mount_tool() {
 
     if [[ -L "${bin_path}" ]]; then
         real_path="$(readlink -f "${bin_path}")"
-        npm_prefix="$(npm prefix -g 2> /dev/null || true)"
+        npm_prefix="$(_get_npm_prefix)"
         if [[ -n "${npm_prefix}" ]] && [[ "${real_path}" == "${npm_prefix}"/* ]]; then
             # npm-installed: mount the whole prefix so lib/node_modules is reachable.
             _mount_npm_global_prefix "${npm_prefix}"
@@ -240,6 +282,8 @@ resolve_and_mount_tool() {
         _mount_ro_dir_if_needed "${cmd_dir}"
         _mount_ro_dir_if_needed "$(dirname "${real_path}")"
     else
+        # Non-symlink binary: mount its directory.  _mount_ro_dir_if_needed
+        # de-duplicates internally, so no prior prefix check is needed here.
         _mount_ro_dir_if_needed "${cmd_dir}"
     fi
 }
@@ -254,7 +298,7 @@ resolve_and_mount_tool() {
 _mount_npm_global_prefix() {
     local npm_prefix="${1:-}"
     if [[ -z "${npm_prefix}" ]]; then
-        npm_prefix="$(npm prefix -g 2> /dev/null || true)"
+        npm_prefix="$(_get_npm_prefix)"
     fi
     [[ -n "${npm_prefix}" ]] && [[ -d "${npm_prefix}" ]] || return 0
 
@@ -341,11 +385,9 @@ pass_through_if_set() {
 #   which never matches any real path.
 _is_prefix_of() {
     local a="$1" b="$2"
-    if [[ "${a}" == "/" ]]; then
-        # Every absolute path is under /.
-        return 0
-    fi
-    [[ "${b}" == "${a}" ]] || [[ "${b}" == "${a}/"* ]]
+    # a="/" matches every absolute path; otherwise b must equal a or sit
+    # directly beneath it (a/...).
+    [[ "${a}" == "/" || "${b}" == "${a}" || "${b}" == "${a}/"* ]]
 }
 
 # _check_path_safe CANON CONTEXT
@@ -386,6 +428,11 @@ _is_prefix_of() {
 #                          uv per-index auth tokens (`uv auth login`);
 #                          default path ~/.local/share/uv/credentials
 #                          (confirmed via `uv auth dir`)
+#
+#       Password managers
+#         ~/.password-store    pass/gopass GPG-encrypted secret store
+#         ~/.config/1Password  1Password CLI session and config
+#         ~/.config/op         1Password CLI (alternate config path)
 #
 #       GitHub CLI
 #         ~/.config/gh/    GitHub CLI auth tokens (hosts.yml, etc.)
@@ -435,6 +482,10 @@ _check_path_safe() {
         "${_HOME}/.yarnrc.yml"
         "${_HOME}/.yarn"
         "${XDG_DATA_HOME}/uv/credentials"
+        # Password managers
+        "${_HOME}/.password-store"   # pass / gopass encrypted secret store
+        "${_HOME}/.config/1Password" # 1Password CLI session/config
+        "${_HOME}/.config/op"        # 1Password CLI (alternate path)
         # GitHub CLI tokens
         "${_HOME}/.config/gh"
         # System
@@ -534,7 +585,7 @@ validate_extra_path() {
 #   _MOUNTED_PREFIXES) and AFTER build_home_tmpfs (which creates the
 #   $HOME tmpfs that intermediate --dir entries populate).
 build_extra_path_mounts() {
-    local _raw_path _canon
+    local _raw_path _canon _target
 
     # ── Read-only extra paths ────────────────────────────────────
     for _raw_path in "${EXTRA_RO_PATHS[@]+"${EXTRA_RO_PATHS[@]}"}"; do
@@ -544,19 +595,10 @@ build_extra_path_mounts() {
             # Directories: go through the dedup helper.
             _mount_ro_dir_if_needed "${_canon}"
         else
-            # Files: --ro-bind directly.  Create intermediate --dir entries
-            # if the file lives under $HOME (the tmpfs has no subdirs yet).
-            if [[ "${_canon}" == "${_HOME}"/* ]]; then
-                local _file_parent="${_canon%/*}"
-                local _rel="${_file_parent#"${_HOME}"/}"
-                local _accum="${_HOME}"
-                local _parts _i
-                IFS='/' read -ra _parts <<< "${_rel}"
-                for ((_i = 0; _i < ${#_parts[@]}; _i++)); do
-                    _accum="${_accum}/${_parts[$_i]}"
-                    BWRAP_ARGS+=(--dir "${_accum}")
-                done
-            fi
+            # Files: --ro-bind directly.  Pre-create the file's parent
+            # directory chain if it lives under $HOME (the tmpfs has no
+            # subdirs yet); the file itself is the bind mount point.
+            _emit_home_intermediate_dirs "${_canon%/*}" inclusive
             BWRAP_ARGS+=(--ro-bind "${_canon}" "${_canon}")
         fi
     done
@@ -565,23 +607,16 @@ build_extra_path_mounts() {
     for _raw_path in "${EXTRA_RW_PATHS[@]+"${EXTRA_RW_PATHS[@]}"}"; do
         _canon="$(validate_extra_path "${_raw_path}" "rw")"
 
-        # Create intermediate --dir entries if the path is under $HOME.
-        if [[ "${_canon}" == "${_HOME}"/* ]]; then
-            local _rel _target
-            if [[ -d "${_canon}" ]]; then
-                _target="${_canon}"
-            else
-                _target="${_canon%/*}"
-            fi
-            _rel="${_target#"${_HOME}"/}"
-            local _accum="${_HOME}"
-            local _parts _i
-            IFS='/' read -ra _parts <<< "${_rel}"
-            for ((_i = 0; _i < ${#_parts[@]}; _i++)); do
-                _accum="${_accum}/${_parts[$_i]}"
-                BWRAP_ARGS+=(--dir "${_accum}")
-            done
+        # Pre-create the intermediate --dir chain when the path is under
+        # $HOME.  For a directory the chain includes the target itself (the
+        # subsequent --bind lands on top of that --dir); for a file the
+        # chain stops at the parent directory.
+        if [[ -d "${_canon}" ]]; then
+            _target="${_canon}"
+        else
+            _target="${_canon%/*}"
         fi
+        _emit_home_intermediate_dirs "${_target}" inclusive
 
         BWRAP_ARGS+=(--bind "${_canon}" "${_canon}")
     done
@@ -927,21 +962,10 @@ build_workdir_mount() {
     # already canonical paths, so no readlink -f step is needed here.
     _check_path_safe "${_BIND_DIR}" "working directory"
 
-    # If the bind dir is under HOME, create intermediate directories
-    # in the tmpfs so the bind mount point is reachable.
-    if [[ "${_BIND_DIR}" == "${_HOME}"/* ]]; then
-        local _rel="${_BIND_DIR#"${_HOME}"/}"
-        local _accum="${_HOME}"
-        local _parts
-        IFS='/' read -ra _parts <<< "${_rel}"
-        # Create all intermediate dirs except the final component (which
-        # will be the bind mount point itself).
-        local _i
-        for ((_i = 0; _i < ${#_parts[@]} - 1; _i++)); do
-            _accum="${_accum}/${_parts[$_i]}"
-            BWRAP_ARGS+=(--dir "${_accum}")
-        done
-    fi
+    # If the bind dir is under HOME, create intermediate directories in the
+    # tmpfs so the bind mount point is reachable.  _BIND_DIR is itself the
+    # bind mount point, so only its ancestors are pre-created.
+    _emit_home_intermediate_dirs "${_BIND_DIR}"
     BWRAP_ARGS+=(
         --bind "${_BIND_DIR}" "${_BIND_DIR}"
     )
@@ -1088,10 +1112,22 @@ build_env_vars() {
         # We use compgen -e to list all exported vars and unset each one.
         # Note: we already exec with env -i, but --unsetenv ensures any
         # vars inherited through other means are also cleared.
+        #
+        # Read line-by-line (not `for x in $(...)`) so names are not
+        # word-split on IFS, and skip anything that is not a portable
+        # shell identifier — bash exports function definitions under names
+        # like `BASH_FUNC_module%%`, which would become invalid --unsetenv
+        # arguments.
+        #
+        # On HPC login nodes the exported-var count can reach the hundreds;
+        # each becomes a separate --unsetenv pair, so this path can produce
+        # a long bwrap command line.  That is unavoidable here and harmless
+        # (well under ARG_MAX); the modern --clearenv path above avoids it.
         local _envvar
-        for _envvar in $(compgen -e); do
+        while IFS= read -r _envvar; do
+            [[ "${_envvar}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
             BWRAP_ARGS+=(--unsetenv "${_envvar}")
-        done
+        done < <(compgen -e)
     fi
 
     # Always set
@@ -1184,6 +1220,33 @@ resolve_env_bin() {
     exit 1
 }
 
+# _bwrap_flag_arity FLAG
+#   Echo the number of value arguments that bwrap flag FLAG consumes (0, 1,
+#   or 2).  Used by print_dry_run to group flags with their values WITHOUT
+#   guessing from the value's leading characters — a path value that happens
+#   to start with "--" (e.g. a user-supplied --ro-path) must not be mistaken
+#   for a new flag.  Only the flags this library actually emits are listed;
+#   the default of 1 is a safe fallback for any single-value flag.
+_bwrap_flag_arity() {
+    case "$1" in
+        --unshare-* | --share-net | --die-with-parent | --new-session | \
+            --clearenv | --as-pid-1)
+            echo 0
+            ;;
+        --ro-bind | --ro-bind-try | --bind | --bind-try | --dev-bind | \
+            --dev-bind-try | --symlink | --setenv | \
+            --file | --bind-data | --ro-bind-data)
+            echo 2
+            ;;
+        --dir | --tmpfs | --proc | --dev | --unsetenv | --chdir | --hostname)
+            echo 1
+            ;;
+        *)
+            echo 1
+            ;;
+    esac
+}
+
 print_dry_run() {
     local _BWRAP_BIN _ENV_BIN
     _BWRAP_BIN="$(command -v bwrap)"
@@ -1200,24 +1263,20 @@ print_dry_run() {
     printf "  LC_CTYPE=%q \\\\\n" "${LC_CTYPE:-C.UTF-8}"
     printf "  %s \\\\\n" "${_BWRAP_BIN}"
 
-    # Print bwrap arguments one per line, quoting values with spaces
-    local i=0 arg
+    # Print bwrap arguments one flag-plus-values per line.  Each flag's
+    # value count comes from _bwrap_flag_arity, so a value beginning with
+    # "--" is grouped with its flag instead of being misread as a new flag.
+    local i=0 arg _arity _j
     while [[ $i -lt ${#BWRAP_ARGS[@]} ]]; do
         arg="${BWRAP_ARGS[$i]}"
-        if [[ "${arg}" == --* ]]; then
-            # It's a flag; figure out how many values follow
-            printf "    %s" "${arg}"
+        _arity="$(_bwrap_flag_arity "${arg}")"
+        printf "    %s" "${arg}"
+        i=$((i + 1))
+        for ((_j = 0; _j < _arity && i < ${#BWRAP_ARGS[@]}; _j++)); do
+            printf " '%s'" "${BWRAP_ARGS[$i]}"
             i=$((i + 1))
-            # Print subsequent non-flag arguments on the same line
-            while [[ $i -lt ${#BWRAP_ARGS[@]} ]] && [[ "${BWRAP_ARGS[$i]}" != --* ]]; do
-                printf " '%s'" "${BWRAP_ARGS[$i]}"
-                i=$((i + 1))
-            done
-            printf " \\\\\n"
-        else
-            printf "    '%s' \\\\\n" "${arg}"
-            i=$((i + 1))
-        fi
+        done
+        printf " \\\\\n"
     done
     printf "    --"
     local _cmd_part
