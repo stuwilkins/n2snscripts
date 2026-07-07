@@ -864,7 +864,7 @@ build_proc_dev_tmp() {
 # node is absent (e.g. non-NUMA kernels lacking /sys/devices/system/node).
 build_sys_mounts() {
     BWRAP_ARGS+=(
-        --ro-bind-try /sys/devices/system/cpu  /sys/devices/system/cpu
+        --ro-bind-try /sys/devices/system/cpu /sys/devices/system/cpu
         --ro-bind-try /sys/devices/system/node /sys/devices/system/node
     )
 }
