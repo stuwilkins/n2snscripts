@@ -393,7 +393,7 @@ build_claude_env() {
     # In foundry mode the haiku model used for background tasks defaults to a
     # date-pinned ID that the foundry proxy may not recognise.  Override with
     # the un-pinned alias unless the caller has already set a preference.
-    BWRAP_ARGS+=(--setenv ANTHROPIC_DEFAULT_HAIKU_MODEL \
+    BWRAP_ARGS+=(--setenv ANTHROPIC_DEFAULT_HAIKU_MODEL
         "${ANTHROPIC_DEFAULT_HAIKU_MODEL:-claude-haiku-4-5}")
 
     # Debug/diagnostic env vars — passed through if set on the host.
