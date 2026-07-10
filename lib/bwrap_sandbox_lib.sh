@@ -124,14 +124,14 @@ detect_bwrap_capabilities() {
     # --clearenv: Start with an empty environment (added in 0.5.0)
     # Fallback: manually unset all host env vars with --unsetenv
     HAS_CLEARENV=0
-    _version_ge "${_bwrap_ver}" "0.5.0" && HAS_CLEARENV=1
+    if _version_ge "${_bwrap_ver}" "0.5.0"; then HAS_CLEARENV=1; fi
 
     # Bind over ro-bind: ability to bind-mount on top of a read-only bind
     # mount (e.g., masking /usr/bin/ssh after --ro-bind /usr /usr).
     # This works in 0.6.3+; earlier versions fail with "Permission denied".
     # Fallback: skip binary masking (security reduction — tools remain accessible)
     HAS_BIND_OVER_RO=0
-    _version_ge "${_bwrap_ver}" "0.6.3" && HAS_BIND_OVER_RO=1
+    if _version_ge "${_bwrap_ver}" "0.6.3"; then HAS_BIND_OVER_RO=1; fi
 }
 
 # Detect kernel-level security features that affect bwrap argument choice.
@@ -154,7 +154,7 @@ detect_kernel_capabilities() {
     _kver="${_kver%%-*}"            # strip suffix e.g. "5.14.0-427.el9" -> "5.14.0"
 
     KERNEL_HAS_TIOCSTI_CAP_GUARD=0
-    _version_ge "${_kver}" "5.14" && KERNEL_HAS_TIOCSTI_CAP_GUARD=1
+    if _version_ge "${_kver}" "5.14"; then KERNEL_HAS_TIOCSTI_CAP_GUARD=1; fi
 }
 
 detect_shell() {
