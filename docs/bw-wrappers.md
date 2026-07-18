@@ -46,7 +46,9 @@ project-dotfiles to the host data dir; `auth.json` is persisted only if
 it already exists on the host (use `--init-auth` once to create it for
 personal accounts).
 
-No options beyond the common set.
+| Option | Description |
+| --- | --- |
+| `--github-tokens` | Forward every `GH_TOKEN_*` environment variable into the sandbox so the agent can authenticate `gh`. Off by default. In `--dry-run` mode, token values are printed as `REDACTED`. Use per-command token selection inside the sandbox: `GH_TOKEN="$GH_TOKEN_NSLS2" gh pr list -R NSLS2/repo` |
 
 ## `bwclaude`
 
