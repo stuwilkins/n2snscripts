@@ -19,6 +19,17 @@ option list; the tables below summarise the common surface.
   - 0.5.0+ enables `--clearenv`
   - 0.6.3+ enables bind-over-ro-bind binary masking
 
+## Managed system paths
+
+When present, the wrappers expose administrator-managed paths as optional,
+read-only mounts. They do not expose the rest of the corresponding `/etc`
+configuration directories.
+
+- OpenCode: `/etc/opencode/skills`
+- Codex: `/etc/codex/skills`
+- Claude: `/etc/claude-code/.claude/skills` and
+  `/etc/claude-code/managed-settings.json`
+
 ## Common options
 
 Every `bw*` wrapper accepts these options:
