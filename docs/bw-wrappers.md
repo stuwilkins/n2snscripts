@@ -30,6 +30,16 @@ configuration directories.
 - Claude: `/etc/claude-code/.claude/skills` and
   `/etc/claude-code/managed-settings.json`
 
+## Shared agent skills
+
+Shared agent skills are a deployment-managed skill collection. The deployment
+defines the source repository or checkout and manages read-only aliases at the
+paths above. When those aliases are present, `bwopencode`, `bwcodex`, and
+`bwclaude` mount them read-only into their sandboxes.
+
+Contribute or update skills through the deployment's documented contribution
+workflow; do not edit its deployed checkout or managed aliases directly.
+
 ## Common options
 
 Every `bw*` wrapper accepts these options:
@@ -41,6 +51,8 @@ Every `bw*` wrapper accepts these options:
 | `--exec CMD` | Run `CMD` inside the sandbox instead of the tool |
 | `--init-auth` | Persist auth credentials to the host (first-time setup) |
 | `--new-session` | Force `bwrap --new-session` (stricter isolation; breaks SIGWINCH) |
+| `--ro-path PATH` | Read-only mount an existing path; its canonical target is mounted at the same canonical destination. Use only narrow paths. |
+| `--rw-path PATH` | Read-write mount an existing path; its canonical target is mounted at the same canonical destination. Use only narrow paths. |
 
 Tool-specific options are listed in each wrapper's section below.
 
@@ -106,6 +118,31 @@ No options beyond the common set.
 
 On shared accounts, auth tokens are ephemeral. On a personal machine,
 run `bwcopilot --init-auth` once to persist tokens.
+
+### Shared skills
+
+`bwcopilot` does not automatically mount the shared skills. Configure
+Copilot CLI's documented `skillDirectories` in `$COPILOT_HOME/settings.json`
+(default: `~/.copilot/settings.json`) to point at the deployment's shared
+skills directory. In the example below, replace
+`/path/to/deployment/shared-skills` with that directory.
+
+For `bwcopilot`, mount both the shared skills directory and the settings file
+read-only. This command is appropriate when the default settings file is a
+regular (non-symlink) file:
+
+```console
+bwcopilot --ro-path /path/to/deployment/shared-skills \
+  --ro-path "$HOME/.copilot/settings.json"
+```
+
+The read-only settings mount prevents Copilot from writing `/settings`; edit
+the host settings file between sessions to change its configuration.
+
+`--ro-path` canonicalizes symlinks and binds the canonical source at that
+same canonical destination. Therefore, a symlinked dotfiles settings alias is
+not available as `$COPILOT_HOME/settings.json` in the sandbox. The example
+requires a regular (non-symlink) settings file at that location.
 
 ## `bwcodex`
 
