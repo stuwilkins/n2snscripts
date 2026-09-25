@@ -29,13 +29,17 @@ configuration directories.
 - Codex: `/etc/codex/skills`
 - Claude: `/etc/claude-code/.claude/skills` and
   `/etc/claude-code/managed-settings.json`
+- Copilot: its deployment-defined shared-skill directory, when configured by
+  the wrapper
 
 ## Shared agent skills
 
 Shared agent skills are a deployment-managed skill collection. The deployment
 defines the source repository or checkout and manages read-only aliases at the
 paths above. When those aliases are present, `bwopencode`, `bwcodex`, and
-`bwclaude` mount them read-only into their sandboxes.
+`bwclaude` mount them read-only into their sandboxes. A wrapper configured for
+Copilot likewise mounts its deployment-defined shared-skill directory
+read-only.
 
 Contribute or update skills through the deployment's documented contribution
 workflow; do not edit its deployed checkout or managed aliases directly.
@@ -121,19 +125,19 @@ run `bwcopilot --init-auth` once to persist tokens.
 
 ### Shared skills
 
-`bwcopilot` does not automatically mount the shared skills. Configure
-Copilot CLI's documented `skillDirectories` in `$COPILOT_HOME/settings.json`
-(default: `~/.copilot/settings.json`) to point at the deployment's shared
-skills directory. In the example below, replace
-`/path/to/deployment/shared-skills` with that directory.
+When configured by the wrapper, `bwcopilot` automatically exposes the
+deployment-managed shared-skill directory read-only. Configure Copilot CLI's
+documented `skillDirectories` in `$COPILOT_HOME/settings.json` (default:
+`~/.copilot/settings.json`) to name that same directory.
 
-For `bwcopilot`, mount both the shared skills directory and the settings file
-read-only. This command is appropriate when the default settings file is a
-regular (non-symlink) file:
+The automatic mount supplies the skills directory, but `bwcopilot` does not
+automatically mount `settings.json`; making settings visible remains the
+user's responsibility. To make a host settings file available read-only, use
+`--ro-path`. This is appropriate when the default settings file is a regular
+(non-symlink) file:
 
 ```console
-bwcopilot --ro-path /path/to/deployment/shared-skills \
-  --ro-path "$HOME/.copilot/settings.json"
+bwcopilot --ro-path "$HOME/.copilot/settings.json"
 ```
 
 The read-only settings mount prevents Copilot from writing `/settings`; edit

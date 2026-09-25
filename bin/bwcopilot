@@ -409,6 +409,10 @@ main() {
     build_nsls2_mount
     build_dynamic_tool_mounts
     build_extra_path_mounts
+    # Deployment-managed skills are optional and never replace user-created
+    # skills under COPILOT_HOME.  Bind the deployment alias read-only after
+    # user extra mounts so this narrow final mount cannot be shadowed writable.
+    build_managed_ro_bind /opt/nsls2/n2snskills/skills /opt/nsls2/n2snskills/skills
 
     # Environment variables
     build_env_vars
