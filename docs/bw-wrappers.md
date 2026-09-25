@@ -130,24 +130,14 @@ deployment-managed shared-skill directory read-only. Configure Copilot CLI's
 documented `skillDirectories` in `$COPILOT_HOME/settings.json` (default:
 `~/.copilot/settings.json`) to name that same directory.
 
-The automatic mount supplies the skills directory, but `bwcopilot` does not
-automatically mount `$COPILOT_HOME/settings.json`; making settings visible
-remains the user's responsibility. To mount the host settings file read-only,
-use `--ro-path`. This is appropriate when the default settings file is a
-regular (non-symlink) file:
+When `$COPILOT_HOME/settings.json` exists as a regular file, `bwcopilot`
+automatically mounts it read-only. This also supports a valid symlink: the
+wrapper resolves its source and mounts that source at the logical
+`$COPILOT_HOME/settings.json` destination. Dangling symlinks and directories
+are skipped.
 
-```console
-bwcopilot --ro-path "$HOME/.copilot/settings.json"
-```
-
-The read-only `$COPILOT_HOME/settings.json` mount prevents Copilot's
-`/settings` slash command from persisting changes in the sandbox. Edit the
-host settings file between sessions to change its configuration.
-
-`--ro-path` canonicalizes symlinks and binds the canonical source at that
-same canonical destination. Therefore, a symlinked dotfiles settings alias is
-not available as `$COPILOT_HOME/settings.json` in the sandbox. The example
-requires a regular (non-symlink) settings file at that location.
+The read-only mount prevents Copilot's `/settings` slash command from
+persisting changes in the sandbox. Edit settings on the host between sessions.
 
 ## `bwcodex`
 
