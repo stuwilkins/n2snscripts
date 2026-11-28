@@ -16,6 +16,9 @@ ROOT="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/bin/bwcodex"
 # bwcodex turns these on for itself; a failing check must not end the tests.
 set +o errexit
+# The tests set N2C_GATEWAY themselves; one inherited from the caller (the documented
+# "off") would change every case.
+unset N2C_GATEWAY
 
 PASS=0
 FAIL=0
