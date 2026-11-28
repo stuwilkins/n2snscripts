@@ -72,7 +72,7 @@ run_env() { (env_body "$@"); }
 
 N2C_TOKEN_FILES=("${TOKEN}")
 OUT="$(run_env)"
-check 'token: base URL defaults to hermes' \
+check 'token: base URL defaults to aigw' \
     contains "${OUT}" '--setenv ANTHROPIC_BASE_URL https://aigw.nsls2.bnl.gov/anthropic'
 check 'token: apiKeyHelper reads the token file' \
     contains "${OUT}" "CMD /usr/local/bin/claude --settings {\"apiKeyHelper\":\"cat ${TOKEN}\"}"

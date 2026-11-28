@@ -9,7 +9,7 @@
 #       --n2c-token aifapim), unless N2C_GATEWAY=off.  A provider with an
 #       auth command (cat of the token file) is passed with -c for the session;
 #       nothing is written to config.toml.
-#   - Hermes (AIFAPIM) routing with a personal key (deprecated, advanced use):
+#   - AI gateway (AIFAPIM) routing with a personal key (deprecated, advanced use):
 #       provider block points at
 #       https://${AIFAPIM_HOST}/openai/v1 with x-api-key header;
 #       wrapper plumbs AIFAPIM_HOST + AIFAPIM_API_KEY through.  Set
@@ -82,7 +82,7 @@
 #   --init-auth     Create ~/.codex/auth.json on the host so that ChatGPT-login
 #                   OAuth tokens persist across sessions.  Only meaningful for the
 #                   BNL ITD ChatGPT subscription auth path; has no effect for
-#                   Hermes-routed setups.  On shared accounts, do NOT use this
+#                   gateway-routed setups.  On shared accounts, do NOT use this
 #                   flag — tokens will be ephemeral by default.
 #   --persist-config Bind ~/.codex/config.toml read-write into the sandbox so
 #                   writes persist across sessions.  Default: config.toml is
@@ -295,7 +295,7 @@ Wrapper options (consumed before codex sees the command line):
   --init-auth     Create ~/.codex/auth.json on the host so that ChatGPT-login
                   OAuth tokens persist across sessions.  Only meaningful for the
                   BNL ITD ChatGPT subscription auth path; has no effect for
-                  Hermes-routed setups.  On shared accounts, do NOT use this
+                  gateway-routed setups.  On shared accounts, do NOT use this
                   flag — tokens will be ephemeral by default.
   --persist-config Bind ~/.codex/config.toml read-write into the sandbox so
                   Codex can persist project trust decisions and other
@@ -558,9 +558,9 @@ build_ssl_cert_file_mount() {
 }
 
 # ── Codex env vars ───────────────────────────────────────────────
-# Pass through AIFAPIM_* (Hermes routing) and the documented Codex
+# Pass through AIFAPIM_* (gateway routing) and the documented Codex
 # env vars; default OPENAI_API_KEY to "dummy" if unset so the Codex
-# provider preflight passes for Hermes-routed setups (the real auth
+# provider preflight passes for gateway-routed setups (the real auth
 # is the x-api-key header sourced from AIFAPIM_API_KEY via the
 # provider's env_http_headers).
 # The gateway token (n2c-token "aifapim") when --n2c-token mounted it, else
@@ -606,7 +606,7 @@ build_codex_env() {
         pass_through_if_set AIFAPIM_API_KEY
     fi
 
-    # OPENAI_API_KEY is required by Codex's provider preflight.  Hermes
+    # OPENAI_API_KEY is required by Codex's provider preflight.  The gateway
     # ignores the Authorization header (real auth is x-api-key), so a
     # literal "dummy" value is safe and convenient.
     if [[ -z "${OPENAI_API_KEY:-}" ]]; then

@@ -75,7 +75,7 @@ OUT="$(run_env)"
 CMD="$(cmd_line "${OUT}")"
 check 'token: the provider is chosen after the binary' \
     contains "${CMD}" "CMD /usr/local/bin/codex ${PROVIDER}"
-check 'token: base URL defaults to hermes' \
+check 'token: base URL defaults to aigw' \
     contains "${CMD}" 'base_url="https://aigw.nsls2.bnl.gov/openai/v1"'
 check 'token: Responses API' contains "${CMD}" 'wire_api="responses"'
 check 'token: auth command reads the token file' \

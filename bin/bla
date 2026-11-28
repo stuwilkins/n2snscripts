@@ -56,7 +56,7 @@ readonly AGENT_CREDS_DIR=/run/nsls2/agent/creds
 # move is fixed by a baseline run rather than a release of this script. The
 # constant is only the fallback for a host the role has not reached yet.
 readonly AIFAPIM_HOST_PATH=/etc/nsls2/agent/aifapim/host
-readonly AIFAPIM_GATEWAY_HOST=aifapim.nsls2.bnl.gov # gitleaks:allow
+readonly AIFAPIM_GATEWAY_HOST=aigw.nsls2.bnl.gov # gitleaks:allow
 readonly ACCOUNT_CHECK=/opt/nsls2/libexec/agent-account-check
 
 # $HOME for the agent account. The bw* launchers create their authoring

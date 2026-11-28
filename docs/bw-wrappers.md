@@ -221,7 +221,7 @@ as the token named `aifapim`, so it is mounted like any other:
 
 ```bash
 export N2SN_CREDS_DIR=/run/nsls2/agent/creds
-export AIFAPIM_HOST=aifapim.nsls2.bnl.gov  # gitleaks:allow (a public host name)
+export AIFAPIM_HOST=aigw.nsls2.bnl.gov  # gitleaks:allow (a public host name)
 export AIFAPIM_TOKEN_FILE=/run/nsls2/agent/creds/aifapim/token
 bwopencode2 --n2c-token aifapim --n2c-token observability
 ```
@@ -1749,7 +1749,7 @@ Launches the [Claude CLI](https://docs.claude.com/en/docs/claude-code/overview) 
 bwclaude [bwclaude-options] [claude arguments...]
 ```
 
-Routes through the NSLS-II Hermes (AIFAPIM) gateway, with your own token or
+Routes through the NSLS-II AI gateway (AIFAPIM), with your own token or
 with a key.
 
 ### With your own token (no key)
@@ -1910,7 +1910,7 @@ Three approved auth paths:
 
 - **Your own gateway token (no key)** — plain `bwcodex`, when the `aifapim`
   token file exists; see below.
-- **Hermes (AIFAPIM) routing with a personal key** (deprecated, advanced use;
+- **AI gateway (AIFAPIM) routing with a personal key** (deprecated, advanced use;
   configured in `~/.codex/config.toml`) — provider block points at
   `https://${AIFAPIM_HOST}/openai/v1` with `x-api-key` header; the
   wrapper plumbs `AIFAPIM_HOST` and `AIFAPIM_API_KEY` through.
