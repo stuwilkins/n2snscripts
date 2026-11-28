@@ -73,7 +73,7 @@ run_env() { (env_body "$@"); }
 N2C_TOKEN_FILES=("${TOKEN}")
 OUT="$(run_env)"
 check 'token: base URL defaults to hermes' \
-    contains "${OUT}" '--setenv ANTHROPIC_BASE_URL https://hermes.nsls2.bnl.gov/anthropic'
+    contains "${OUT}" '--setenv ANTHROPIC_BASE_URL https://aigw.nsls2.bnl.gov/anthropic'
 check 'token: apiKeyHelper reads the token file' \
     contains "${OUT}" "CMD /usr/local/bin/claude --settings {\"apiKeyHelper\":\"cat ${TOKEN}\"}"
 check 'token: Foundry mode is switched off' contains "${OUT}" '--unsetenv CLAUDE_CODE_USE_FOUNDRY'
@@ -81,9 +81,9 @@ check 'token: Foundry mode is not switched on' lacks "${OUT}" 'CLAUDE_CODE_USE_F
 check 'token: no key needed' contains "${OUT}" 'exit=0'
 check 'token: no Foundry variables' lacks "${OUT}" 'ANTHROPIC_FOUNDRY'
 
-OUT="$(run_env AIFAPIM_HOST=hermes-dev.nsls2.bnl.gov)"
+OUT="$(run_env AIFAPIM_HOST=aigw-dev.nsls2.bnl.gov)"
 check 'token: AIFAPIM_HOST picks the gateway' \
-    contains "${OUT}" '--setenv ANTHROPIC_BASE_URL https://hermes-dev.nsls2.bnl.gov/anthropic'
+    contains "${OUT}" '--setenv ANTHROPIC_BASE_URL https://aigw-dev.nsls2.bnl.gov/anthropic'
 
 OUT="$(run_env AIFAPIM_API_KEY="${KEY}" CLAUDE_CODE_USE_FOUNDRY=1)"
 check 'token: a key on the host is not used' lacks "${OUT}" "${KEY}"
@@ -232,10 +232,10 @@ EXTRA_RO_PATHS=()
 # ── key mode (legacy) ───────────────────────────────────────────────────
 
 N2C_TOKEN_FILES=("/run/user/1000/nsls2/creds/observability/token")
-OUT="$(run_env AIFAPIM_API_KEY="${KEY}" AIFAPIM_HOST=aifapim.nsls2.bnl.gov)"
+OUT="$(run_env AIFAPIM_API_KEY="${KEY}" AIFAPIM_HOST=aigw.nsls2.bnl.gov)"
 check 'key: Foundry mode is on' contains "${OUT}" '--setenv CLAUDE_CODE_USE_FOUNDRY 1'
 check 'key: Foundry base URL from AIFAPIM_HOST' \
-    contains "${OUT}" '--setenv ANTHROPIC_FOUNDRY_BASE_URL https://aifapim.nsls2.bnl.gov/anthropic'
+    contains "${OUT}" '--setenv ANTHROPIC_FOUNDRY_BASE_URL https://aigw.nsls2.bnl.gov/anthropic'
 check 'key: the key goes through the environment' contains "${OUT}" "ENV ANTHROPIC_FOUNDRY_API_KEY=${KEY}"
 check 'key: the key is not on the bwrap command line' lacks "$(grep '^BWRAP' <<< "${OUT}")" "${KEY}"
 check 'key: no --settings' lacks "${OUT}" '--settings'

@@ -1768,8 +1768,8 @@ nothing and says nothing, so someone without the role sees no warning.
 When that token is mounted, `bwclaude`:
 
 - sets `ANTHROPIC_BASE_URL` to `https://${AIFAPIM_HOST}/anthropic`, with
-  `hermes.nsls2.bnl.gov` when `AIFAPIM_HOST` is not set, so `AIFAPIM_HOST` is
-  only for another gateway (for example `hermes-dev.nsls2.bnl.gov`);
+  `aigw.nsls2.bnl.gov` when `AIFAPIM_HOST` is not set, so `AIFAPIM_HOST` is
+  only for another gateway (for example `aigw-dev.nsls2.bnl.gov`);
 - does not use Foundry mode (a host `CLAUDE_CODE_USE_FOUNDRY` is unset in the
   sandbox), and ignores `AIFAPIM_API_KEY`;
 - passes `--settings '{"apiKeyHelper":"cat <token file>"}'` to `claude`.
@@ -1934,7 +1934,7 @@ Codex a provider and the choice of it on the command line, for this session
 only. Nothing is written to `config.toml`:
 
 - The provider is `nsls2-hermes-token`, with `base_url`
-  `https://${AIFAPIM_HOST}/openai/v1` (`hermes.nsls2.bnl.gov` when
+  `https://${AIFAPIM_HOST}/openai/v1` (`aigw.nsls2.bnl.gov` when
   `AIFAPIM_HOST` is not set) and `wire_api = "responses"`.
 - Its `auth` command is `cat` of the token file. Codex runs it at the start,
   every 5 minutes and after an authentication retry, so it picks up the file

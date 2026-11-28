@@ -325,7 +325,7 @@ AI gateway:
     bwclaude
   The token is added to the ones you ask for with --n2c-token, so
   `--n2c-token docs` mounts both.  claude then calls
-  https://$AIFAPIM_HOST/anthropic (default hermes.nsls2.bnl.gov) and gets the
+  https://$AIFAPIM_HOST/anthropic (default aigw.nsls2.bnl.gov) and gets the
   token from an apiKeyHelper passed with --settings, which re-reads the file
   n2c-token renews.  The token needs the gateway's user role (ask DSSI); without
   the file nothing is added and nothing is said.  `--n2c-token aifapim` asks for
@@ -556,7 +556,7 @@ build_claude_env() {
             echo "Error: the aifapim token path '${_gw_token}' may only contain letters, digits and / . _ -" >&2
             exit 1
         fi
-        BWRAP_ARGS+=(--setenv ANTHROPIC_BASE_URL "https://${AIFAPIM_HOST:-hermes.nsls2.bnl.gov}/anthropic")
+        BWRAP_ARGS+=(--setenv ANTHROPIC_BASE_URL "https://${AIFAPIM_HOST:-aigw.nsls2.bnl.gov}/anthropic")
     else
         # Foundry mode is forced on (see CLAUDE_CODE_USE_FOUNDRY below).
         # In foundry mode, Claude Code uses ANTHROPIC_FOUNDRY_* env vars and
